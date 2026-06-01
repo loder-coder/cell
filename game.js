@@ -1,5 +1,5 @@
 (() => {
-  const { BGM_PATH, ENEMY_BEHAVIORS, ENEMY_CAP_HP_STEP, ENEMY_CAP_MAX_BONUS, TAU } = globalThis.CellConstants;
+  const { BGM_PATH, ENEMY_BEHAVIORS, TAU } = globalThis.CellConstants;
   const { angleDelta, clamp, dist2, isOutsideRect, rand } = globalThis.CellUtils;
   const { createRuntimeConfig } = globalThis.CellPlatform;
   const { SpatialHash } = globalThis.CellSpatial;
@@ -58,8 +58,10 @@
   let bannerTimer = 0;
   let finalPhase = false;
   let finalBossSpawned = false;
-  let enemyCapBonus = 0;
+  let enemyFortifyPulse = 0;
   let lastStatsSignature = "";
+  let mutationLockTimer = 0;
+  let swarmAngle = 0;
 
   const keys = new Set();
   const enemies = [];
@@ -79,6 +81,11 @@
     effectScale: 1,
     trailLimit: 9,
     hpBarStride: 1,
+    shadowScale: 1,
+    gridSkip: false,
+    particleDrawStride: 1,
+    bodyStep: 1,
+    enemySoftCap: MAX_ENEMIES,
     textCooldown: 0,
   };
   const balance = {
@@ -141,6 +148,7 @@
     splitting: 0,
     dash: 0,
     slime: 0,
+    evolutionLevel: 0,
     evolution: "",
     evolutionName: "",
     mutationPulse: 0,
@@ -188,6 +196,13 @@
     toxicHive: { name: "산성 포자 군체", hint: "산성 + 포자" },
     immortalMass: { name: "불멸 생체질량", hint: "재생 + 껍질" },
     swarmOrganism: { name: "분열 사식군", hint: "분열 + 흡수" },
+  };
+
+  const evolutionUpgradeLabels = {
+    electricTentacles: ["전류 분기", "번개가 더 많은 적에게 갈라집니다."],
+    toxicHive: ["독성 배양", "독 장판이 더 넓고 오래 남습니다."],
+    immortalMass: ["불멸 파동", "생체 파동 피해와 밀어내기가 강화됩니다."],
+    swarmOrganism: ["분열 회전", "회전 투사체 발사량과 피해가 증가합니다."],
   };
 
   const mutationLabels = {
@@ -299,20 +314,33 @@
   }
 
   function enemyCapDifficultyScale() {
-    return 1 + enemyCapBonus;
+    return 1;
   }
 
   function enemyCapDamageScale() {
-    return 1 + enemyCapBonus * 0.72;
+    return 1;
   }
 
   function enemyCapSpeedScale() {
-    return 1 + enemyCapBonus * 0.14;
+    return 1;
   }
 
-  function addEnemyCapPressure(strength = 1) {
-    if (finalPhase) return;
-    enemyCapBonus = clamp(enemyCapBonus + ENEMY_CAP_HP_STEP * strength, 0, ENEMY_CAP_MAX_BONUS);
+  function fortifyExistingEnemies(strength = 1) {
+    if (finalPhase || !enemies.length) return;
+    const count = Math.min(enemies.length, Math.max(3, Math.floor(4 + strength * 4)));
+    for (let i = 0; i < count; i++) {
+      const enemy = enemies[(Math.floor(Math.random() * enemies.length) + i * 7) % enemies.length];
+      if (!enemy || enemy.kind === "tutorial" || enemy.kind === "phage") continue;
+      const hpGain = enemy.maxHp * (0.035 + strength * 0.012);
+      enemy.maxHp += hpGain;
+      enemy.hp += hpGain;
+      enemy.damage *= 1.015 + strength * 0.004;
+      enemy.speed *= 1.006 + strength * 0.002;
+      enemy.fortified = Math.min(3, (enemy.fortified || 0) + 1);
+      enemy.pulse = Math.max(enemy.pulse || 0, 1.2);
+      if (enemy.components && enemy.components.render) enemy.components.render.flash = 0.35;
+    }
+    enemyFortifyPulse = 1.4;
   }
 
   function xpMultiplier() {
@@ -322,12 +350,17 @@
   function updatePerformanceGuard(dt) {
     perfGuard.textCooldown = Math.max(0, perfGuard.textCooldown - dt);
     const timePressure = clamp((runTime - 480) / 360, 0, 1);
-    const fpsPressure = clamp((55 - perf.fps) / 18, 0, 1);
+    const fpsPressure = clamp((60 - perf.fps) / 14, 0, 1);
     const objectPressure = Math.max(particles.length / MAX_PARTICLES, projectiles.length / MAX_PROJECTILES);
-    const pressure = clamp(Math.max(timePressure * 0.55, fpsPressure, objectPressure - 0.72), 0, 1);
-    perfGuard.effectScale = clamp(1 - pressure * 0.72, runtimeConfig.mobile ? 0.22 : 0.32, 1);
-    perfGuard.trailLimit = Math.max(2, Math.round(9 - pressure * 6));
-    perfGuard.hpBarStride = pressure > 0.65 ? 4 : pressure > 0.35 ? 3 : enemies.length > 110 ? 2 : 1;
+    const pressure = clamp(Math.max(timePressure * 0.7, fpsPressure, objectPressure - 0.55), 0, 1);
+    perfGuard.effectScale = clamp(1 - pressure * 0.84, runtimeConfig.mobile ? 0.12 : 0.2, 1);
+    perfGuard.trailLimit = pressure > 0.82 ? 0 : Math.max(1, Math.round(8 - pressure * 7));
+    perfGuard.hpBarStride = pressure > 0.78 ? 999 : pressure > 0.55 ? 5 : pressure > 0.3 ? 3 : enemies.length > 100 ? 2 : 1;
+    perfGuard.shadowScale = pressure > 0.55 ? 0 : clamp(1 - pressure * 1.6, 0.12, 1);
+    perfGuard.gridSkip = pressure > 0.35;
+    perfGuard.particleDrawStride = pressure > 0.78 ? 4 : pressure > 0.55 ? 3 : pressure > 0.3 ? 2 : 1;
+    perfGuard.bodyStep = pressure > 0.65 ? 3 : pressure > 0.35 ? 2 : 1;
+    perfGuard.enemySoftCap = Math.floor(MAX_ENEMIES * clamp(1 - pressure * 0.28, 0.72, 1));
   }
 
   function enemySizeScale(kind) {
@@ -411,6 +444,7 @@
       splitting: 0,
       dash: 0,
       slime: 0,
+      evolutionLevel: 0,
       evolution: "",
       evolutionName: "",
       mutationPulse: 0,
@@ -425,7 +459,9 @@
     bossTimer = 68;
     finalPhase = false;
     finalBossSpawned = false;
-    enemyCapBonus = 0;
+    enemyFortifyPulse = 0;
+    mutationLockTimer = 0;
+    swarmAngle = 0;
     lastStatsSignature = "";
     balance.damageTotal = 0;
     balance.healTotal = 0;
@@ -504,8 +540,8 @@
   function spawnEnemy(kind) {
     const type = enemyTypes[kind];
     if (!type) return;
-    if (enemies.length >= MAX_ENEMIES) {
-      addEnemyCapPressure(kind === "giant" ? 0.5 : kind === "phage" ? 1 : 0.14);
+    if (enemies.length >= perfGuard.enemySoftCap) {
+      fortifyExistingEnemies(kind === "giant" ? 0.8 : kind === "phage" ? 1.4 : 0.25);
       return false;
     }
     const angle = rand(0, TAU);
@@ -544,6 +580,7 @@
     enemy.hit = 0;
     enemy.pulse = 0;
     enemy.splitDone = false;
+    enemy.fortified = 0;
     enemies.push(enemy);
     return true;
   }
@@ -999,6 +1036,7 @@
   function openMutation() {
     if (state !== "play") return;
     state = "mutation";
+    mutationLockTimer = 2;
     choices = [];
     choices = pickMutationChoices(3);
     choiceGrid.innerHTML = "";
@@ -1006,22 +1044,38 @@
     choices.forEach((mutation) => {
       const button = document.createElement("button");
       const current = stackOf(mutation.id);
+      const pipMax = mutation.id === "evolutionUpgrade" ? 3 : MAX_STACK;
       button.className = "choice";
       button.innerHTML = `<strong>${mutation.name}</strong><span>${mutation.type}</span><b class="tag">${mutation.tag}</b><div class="stack">${stackPips(current)}</div><span>${mutation.desc}</span><em class="path">진화 암시: ${mutation.path}</em>`;
       button.querySelector(".path").textContent = `진화 암시: ${mutation.path}`;
       button.addEventListener("click", () => chooseMutation(mutation));
       choiceGrid.appendChild(button);
     });
+    updateChoiceLock();
     mutationPanel.classList.remove("hidden");
     playSound("level");
     screenPulse = Math.max(screenPulse, 0.45);
     hitStop = Math.max(hitStop, 0.08);
   }
 
+  function updateChoiceLock() {
+    if (state !== "mutation") return;
+    const locked = mutationLockTimer > 0;
+    if (locked) mutationTitle.textContent = `선택 잠김 ${mutationLockTimer.toFixed(1)}s`;
+    else mutationTitle.textContent = "변이를 선택하세요";
+    choiceGrid.querySelectorAll(".choice").forEach((button) => {
+      button.disabled = locked;
+      button.classList.toggle("locked", locked);
+    });
+  }
+
   function pickMutationChoices(count) {
     const pool = mutations
       .filter((mutation) => stackOf(mutation.id) < MAX_STACK)
       .map((mutation) => ({ mutation, weight: mutationWeight(mutation) }));
+    if (player.evolution && player.evolutionLevel < 3) {
+      pool.push({ mutation: createEvolutionUpgradeChoice(), weight: 5.5 + player.evolutionLevel * 1.5 });
+    }
     const picked = [];
     while (picked.length < count && pool.length) {
       const total = pool.reduce((sum, item) => sum + item.weight, 0);
@@ -1037,6 +1091,38 @@
     return picked;
   }
 
+  function createEvolutionUpgradeChoice() {
+    const label = evolutionUpgradeLabels[player.evolution] || ["진화 강화", "현재 진화 능력이 강화됩니다."];
+    return {
+      id: "evolutionUpgrade",
+      name: `${label[0]} ${player.evolutionLevel + 1}`,
+      type: "진화 강화",
+      tag: `진화 Lv.${player.evolutionLevel + 1}/3`,
+      desc: label[1],
+      path: player.evolutionName || "진화 능력 강화",
+      apply: applyEvolutionUpgrade,
+    };
+  }
+
+  function applyEvolutionUpgrade() {
+    if (!player.evolution || player.evolutionLevel >= 3) return;
+    player.evolutionLevel++;
+    if (player.evolution === "electricTentacles") {
+      player.attackSpeed += 0.06;
+      player.electric = Math.min(MAX_STACK, player.electric + 1);
+    } else if (player.evolution === "toxicHive") {
+      player.regen += 0.4;
+      player.acid = Math.min(MAX_STACK, player.acid + 1);
+    } else if (player.evolution === "immortalMass") {
+      player.armor += 0.035;
+      player.maxHp += 18;
+      player.hp += 18;
+    } else if (player.evolution === "swarmOrganism") {
+      player.attackSpeed += 0.05;
+      player.splitting = Math.min(MAX_STACK, player.splitting + 1);
+    }
+  }
+
   function mutationWeight(mutation) {
     const stack = stackOf(mutation.id);
     let weight = 1 + stack * 1.65;
@@ -1050,17 +1136,20 @@
   }
 
   function stackOf(id) {
+    if (id === "evolutionUpgrade") return player.evolutionLevel;
     if (id === "acceleration") return player.accelStack;
     return player[id] || 0;
   }
 
   function stackPips(current) {
     let html = "";
-    for (let i = 0; i < MAX_STACK; i++) html += `<i class="${i < current ? "on" : ""}"></i>`;
+    const max = MAX_STACK;
+    for (let i = 0; i < max; i++) html += `<i class="${i < current ? "on" : ""}"></i>`;
     return html;
   }
 
   function chooseMutation(mutation) {
+    if (mutationLockTimer > 0) return;
     const before = stackOf(mutation.id);
     playSound("card");
     mutation.apply();
@@ -1120,6 +1209,7 @@
     playerHurt = Math.max(0, playerHurt - dt * 3.8);
     screenPulse = Math.max(0, screenPulse - dt * 1.6);
     bannerTimer = Math.max(0, bannerTimer - dt);
+    enemyFortifyPulse = Math.max(0, enemyFortifyPulse - dt);
     if (painFlash) painFlash.style.opacity = (Math.max(playerHurt, screenPulse * 0.45) * quality.screenEffectScale).toFixed(3);
     if (bannerTimer <= 0) evolutionBanner.classList.add("hidden");
     if (state === "paused") {
@@ -1127,6 +1217,10 @@
       return;
     }
     if (state !== "play") {
+      if (state === "mutation") {
+        mutationLockTimer = Math.max(0, mutationLockTimer - dt);
+        updateChoiceLock();
+      }
       updateParticles(dt);
       return;
     }
@@ -1203,9 +1297,9 @@
   }
 
   function spawnWave(waveIndex) {
-    const spawnBudget = Math.min(MAX_ENEMIES - enemies.length, 14 + waveIndex * 4);
+    const spawnBudget = Math.min(perfGuard.enemySoftCap - enemies.length, 14 + waveIndex * 4);
     if (spawnBudget <= 0) {
-      addEnemyCapPressure(1.2);
+      fortifyExistingEnemies(1.2);
       return;
     }
     const heavyCount = Math.min(4 + Math.floor(waveIndex / 2), Math.floor(spawnBudget * 0.32));
@@ -1282,9 +1376,14 @@
             const tipX = player.x + Math.cos(angle) * Math.min(range, Math.hypot(target.x - player.x, target.y - player.y) * 0.72);
             const tipY = player.y + Math.sin(angle) * Math.min(range, Math.hypot(target.x - player.x, target.y - player.y) * 0.72);
             spawnElectricArc(tipX, tipY, target.x, target.y);
-            enemyGrid.forEachInCircle(target.x, target.y, 175, (near) => {
-              if (near !== target && (near.x - target.x) ** 2 + (near.y - target.y) ** 2 < 175 ** 2) {
-                damageEnemy(near, 9 + player.electric * 4, "#8fffd3", 70);
+            const chainRadius = 175 + player.evolutionLevel * 28;
+            let chainCount = 0;
+            const maxChains = 3 + player.evolutionLevel * 2;
+            enemyGrid.forEachInCircle(target.x, target.y, chainRadius, (near) => {
+              if (chainCount >= maxChains) return;
+              if (near !== target && (near.x - target.x) ** 2 + (near.y - target.y) ** 2 < chainRadius ** 2) {
+                chainCount++;
+                damageEnemy(near, 9 + player.electric * 4 + player.evolutionLevel * 3, "#8fffd3", 70);
                 spawnElectricArc(target.x, target.y, near.x, near.y, "#d4fff0");
               }
             });
@@ -1324,19 +1423,23 @@
     if (player.splitting && player.cooldowns.split <= 0) {
       const evolved = player.evolution === "swarmOrganism";
       if (evolved) {
-        const count = Math.max(10, Math.floor((18 + player.splitting * 5) * clamp(perfGuard.effectScale + 0.18, 0.45, 1)));
-        const base = pulse * 3.6;
+        const count = Math.max(4, Math.floor((5 + player.splitting + player.evolutionLevel * 2) * clamp(perfGuard.effectScale + 0.18, 0.45, 1)));
+        swarmAngle = (swarmAngle + 0.42 + player.evolutionLevel * 0.08) % TAU;
+        const base = swarmAngle;
+        const fan = 0.22 + player.evolutionLevel * 0.035;
         for (let i = 0; i < count; i++) {
-          fireProjectileAngle("swarmShard", player.x, player.y, base + (i / count) * TAU, player.splitting + player.absorption);
+          const offset = count === 1 ? 0 : (i / (count - 1) - 0.5) * fan;
+          fireProjectileAngle("swarmShard", player.x, player.y, base + offset, player.splitting + player.absorption + player.evolutionLevel);
         }
         spawnParticle(player.x, player.y, "#ff89a1", 26, 1.15, 0.42);
         playSound("attack");
-        player.cooldowns.split = 0.52 / haste;
+        player.cooldowns.split = 0.13 / haste;
         return;
       }
       const targets = sortedEnemiesInRange(220, 1);
       for (const target of targets) {
         damageEnemy(target, 12 + player.splitting * 6, "#ffd2dc", 80);
+        spawnElectricArc(player.x, player.y, target.x, target.y, "#ffd2dc");
         spawnParticle(target.x, target.y, "#ffd2dc", 4, 0.9, 0.42);
       }
       if (targets.length) playSound("attack");
@@ -1458,8 +1561,12 @@
     for (let i = projectiles.length - 1; i >= 0; i--) {
       const p = projectiles[i];
       p.life -= dt;
-      pushTrailPoint(p.trail, p.x, p.y, 1, undefined, perfGuard.trailLimit);
-      for (const t of p.trail) t.life -= dt * 4.2;
+      if (perfGuard.trailLimit > 0) {
+        pushTrailPoint(p.trail, p.x, p.y, 1, undefined, perfGuard.trailLimit);
+        for (const t of p.trail) t.life -= dt * 4.2;
+      } else if (p.trail) {
+        p.trail.length = 0;
+      }
       p.x += p.vx * dt;
       p.y += p.vy * dt;
       if (p.kind === "spore") {
@@ -1572,7 +1679,7 @@
     ctx.translate(width / 2 + sx, height / 2 + sy);
     ctx.scale(camera.scale, camera.scale);
     ctx.translate(-camera.x, -camera.y);
-    drawWorldGrid();
+    if (!perfGuard.gridSkip) drawWorldGrid();
     drawSlimeTrail();
     drawTargeting();
     drawElectricRange();
@@ -1591,7 +1698,7 @@
     const lines = [
       `FPS: ${Math.round(perf.fps)}`,
       `Wave: ${balance.wave}`,
-      `Enemies: ${enemies.length} / ${MAX_ENEMIES}`,
+      `Enemies: ${enemies.length} / ${perfGuard.enemySoftCap}`,
       `Projectiles: ${projectiles.length}`,
       `Particles: ${particles.length} / ${MAX_PARTICLES}`,
       `Effects: ${effects}`,
@@ -1606,8 +1713,10 @@
       `Average TTK: ${balance.avgTtk === Infinity ? "n/a" : `${balance.avgTtk.toFixed(2)}s`}`,
       `FX Scale: ${perfGuard.effectScale.toFixed(2)}`,
       `Trail: ${perfGuard.trailLimit}`,
+      `Draw Step: ${perfGuard.particleDrawStride}`,
+      `Soft Cap: ${perfGuard.enemySoftCap}`,
     ];
-    if (enemyCapBonus > 0) lines.push(`Cap Scaling: +${Math.round(enemyCapBonus * 100)}%`);
+    if (enemyFortifyPulse > 0) lines.push(`Enemy Fortify: active`);
     const x = 14;
     const y = Math.max(14, height - 18 - lines.length * 18);
     const w = 248;
@@ -1617,18 +1726,19 @@
     ctx.font = "800 12px ui-monospace, SFMono-Regular, Consolas, monospace";
     ctx.textBaseline = "top";
     ctx.fillStyle = "rgba(2, 3, 5, 0.68)";
-    ctx.strokeStyle = enemies.length >= MAX_ENEMIES ? "rgba(255, 65, 109, 0.72)" : "rgba(143, 255, 211, 0.28)";
+    ctx.strokeStyle = enemies.length >= perfGuard.enemySoftCap ? "rgba(255, 65, 109, 0.72)" : "rgba(143, 255, 211, 0.28)";
     ctx.lineWidth = 1;
     ctx.fillRect(x, y, w, h);
     ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
     for (let i = 0; i < lines.length; i++) {
-      ctx.fillStyle = i === 1 && enemies.length >= MAX_ENEMIES ? "#ff89a1" : "#d4fff0";
+      ctx.fillStyle = i === 1 && enemies.length >= perfGuard.enemySoftCap ? "#ff89a1" : "#d4fff0";
       ctx.fillText(lines[i], x + 10, y + 8 + i * 18);
     }
     ctx.restore();
   }
 
   function drawTargeting() {
+    if (perfGuard.effectScale < 0.28) return;
     const target = nearestEnemy(840 / camera.scale);
     if (!target) return;
     const alpha = 0.18 + Math.sin(pulse * 9) * 0.05;
@@ -1651,6 +1761,7 @@
 
   function drawElectricRange() {
     if (!player.electric) return;
+    if (perfGuard.effectScale < 0.28) return;
     const evolved = player.evolution === "electricTentacles";
     if (evolved) return;
     const range = electricRange();
@@ -1810,7 +1921,7 @@
 
     ctx.save();
     ctx.translate(player.x, player.y);
-    ctx.shadowBlur = (28 + mutationCount * 3) * quality.shadowScale;
+    ctx.shadowBlur = (28 + mutationCount * 3) * quality.shadowScale * perfGuard.shadowScale;
     ctx.shadowColor = player.electric ? "#8fffd3" : "#ff285e";
 
     const tentacleCount = player.tentacles * 3 + (player.evolution === "electricTentacles" ? 6 : 0);
@@ -1854,7 +1965,7 @@
       }
     }
 
-    for (let i = 0; i < 9 + mutationCount + player.splitting * 4; i++) {
+    for (let i = 0; i < 9 + mutationCount + player.splitting * 4; i += perfGuard.bodyStep) {
       const a = (i / (9 + mutationCount)) * TAU;
       const br = r * (0.34 + ((i * 17) % 41) / 100);
       const spread = 0.31 + player.splitting * 0.025;
@@ -1905,6 +2016,21 @@
       ctx.globalAlpha = 1;
     }
 
+    if (player.splitting) {
+      const cells = 2 + player.splitting * 2 + (player.evolution === "swarmOrganism" ? 4 : 0);
+      ctx.globalAlpha = 0.82;
+      for (let i = 0; i < cells; i++) {
+        const a = pulse * (1.8 + player.splitting * 0.08) + (i / cells) * TAU;
+        const rr = r * (1.05 + (i % 3) * 0.1);
+        ctx.fillStyle = i % 2 ? "#ffd2dc" : "#ff89a1";
+        ctx.beginPath();
+        ctx.arc(Math.cos(a) * rr, Math.sin(a) * rr, 3.5 + player.splitting * 0.55, 0, TAU);
+        ctx.fill();
+        perf.drawCalls++;
+      }
+      ctx.globalAlpha = 1;
+    }
+
     const eyes = 1 + player.eyes * 3 + (player.evolution === "swarmOrganism" ? 8 : 0);
     for (let i = 0; i < eyes; i++) {
       const a = (i / eyes) * TAU + Math.sin(pulse + i) * 0.5;
@@ -1928,10 +2054,10 @@
       if (isOutsideRect(enemy, viewRect, enemy.radius * 2)) continue;
       ctx.save();
       ctx.translate(enemy.x, enemy.y);
-      ctx.shadowBlur = (enemy.hit ? 22 : 12) * quality.shadowScale;
+      ctx.shadowBlur = (enemy.hit ? 22 : 12) * quality.shadowScale * perfGuard.shadowScale;
       ctx.shadowColor = enemy.color;
       ctx.fillStyle = enemy.hit || (enemy.components && enemy.components.render && enemy.components.render.flash > 0) ? "#ffffff" : enemy.color;
-      const spikes = enemy.kind === "parasite" ? 3 : enemy.kind === "giant" || enemy.kind === "phage" ? 12 : enemy.kind === "tutorial" ? 5 : 7;
+      const spikes = perfGuard.effectScale < 0.45 ? 5 : enemy.kind === "parasite" ? 3 : enemy.kind === "giant" || enemy.kind === "phage" ? 12 : enemy.kind === "tutorial" ? 5 : 7;
       const hitScale = 1 + (enemy.pulse || 0) * 0.28;
       ctx.beginPath();
       for (let i = 0; i < spikes; i++) {
@@ -1945,6 +2071,16 @@
       ctx.closePath();
       ctx.fill();
       perf.drawCalls++;
+      if (enemy.fortified) {
+        ctx.globalAlpha = 0.38 + enemy.fortified * 0.12;
+        ctx.strokeStyle = "#ffd36b";
+        ctx.lineWidth = (1.5 + enemy.fortified) / camera.scale;
+        ctx.beginPath();
+        ctx.arc(0, 0, enemy.radius * (1.25 + enemy.fortified * 0.08), 0, TAU);
+        ctx.stroke();
+        perf.drawCalls++;
+        ctx.globalAlpha = 1;
+      }
       if (enemy.kind === "phage") {
         ctx.globalAlpha = 0.72;
         ctx.strokeStyle = "#d8f0ff";
@@ -2006,7 +2142,7 @@
   function drawProjectiles() {
     for (const p of projectiles) {
       if (isOutsideRect(p, viewRect, 220)) continue;
-      if (p.trail && p.trail.length) {
+      if (perfGuard.trailLimit > 0 && p.trail && p.trail.length) {
         ctx.lineCap = "round";
         for (let i = 0; i < p.trail.length - 1; i++) {
           const a = p.trail[i];
@@ -2023,7 +2159,7 @@
         }
       }
       ctx.globalAlpha = clamp(p.life / p.maxLife, 0, 1);
-      ctx.shadowBlur = 18 * quality.shadowScale;
+      ctx.shadowBlur = 18 * quality.shadowScale * perfGuard.shadowScale;
       ctx.shadowColor = p.color;
       ctx.strokeStyle = p.color;
       ctx.lineWidth = p.radius * 0.75;
@@ -2045,7 +2181,9 @@
 
   function drawParticles() {
     ctx.globalCompositeOperation = "lighter";
-    for (const p of particles) {
+    for (let particleIndex = 0; particleIndex < particles.length; particleIndex++) {
+      if (perfGuard.particleDrawStride > 1 && particleIndex % perfGuard.particleDrawStride !== 0) continue;
+      const p = particles[particleIndex];
       if ((p.kind === "splash" || p.kind === "absorb" || p.kind === "electricArc") && isOutsideRect(p, viewRect, 80)) continue;
       const alpha = clamp(p.life / p.maxLife, 0, 1);
       ctx.globalAlpha = alpha;
@@ -2063,7 +2201,7 @@
         ctx.globalCompositeOperation = "lighter";
         ctx.strokeStyle = p.color;
         ctx.lineWidth = (2.2 + p.radius * 0.18) / camera.scale;
-        ctx.shadowBlur = 18 * quality.shadowScale;
+        ctx.shadowBlur = 18 * quality.shadowScale * perfGuard.shadowScale;
         ctx.shadowColor = p.color;
         ctx.beginPath();
         ctx.moveTo(p.x, p.y);
@@ -2103,7 +2241,7 @@
         ctx.strokeStyle = p.color;
         ctx.globalAlpha = alpha * 0.72;
         ctx.lineWidth = (7 + player.shell * 0.7) / camera.scale;
-        ctx.shadowBlur = 24 * quality.shadowScale;
+        ctx.shadowBlur = 24 * quality.shadowScale * perfGuard.shadowScale;
         ctx.shadowColor = p.color;
         ctx.beginPath();
         ctx.arc(p.x, p.y, p.radius, 0, TAU);
@@ -2166,20 +2304,20 @@
     lastStatsSignature = signature;
 
     const mutationChips = [
-      ["TEN", player.tentacles],
-      ["ACD", player.acid],
-      ["ELC", player.electric],
-      ["SPO", player.spores],
-      ["EYE", player.eyes],
-      ["SHL", player.shell],
-      ["SPL", player.splitting],
-      ["ABS", player.absorption],
-      ["SLM", player.slime],
-      ["DSH", player.dash],
-      ["SPD", player.accelStack],
+      ["TEN", "T", player.tentacles],
+      ["ACD", "A", player.acid],
+      ["ELC", "E", player.electric],
+      ["SPO", "P", player.spores],
+      ["EYE", "I", player.eyes],
+      ["SHL", "S", player.shell],
+      ["SPL", "X", player.splitting],
+      ["ABS", "H", player.absorption],
+      ["SLM", "L", player.slime],
+      ["DSH", "D", player.dash],
+      ["SPD", "V", player.accelStack],
     ]
-      .filter(([, value]) => value > 0)
-      .map(([label, value]) => `<span class="stat-chip mutation"><b>${label}</b>${value}</span>`)
+      .filter(([, , value]) => value > 0)
+      .map(([label, icon, value]) => `<span class="stat-chip mutation" title="${label}"><i>${icon}</i><b>${value}</b></span>`)
       .join("");
 
     statPanel.innerHTML = `
@@ -2188,8 +2326,8 @@
       <span class="stat-chip"><b>ARM</b>${Math.round(player.armor * 100)}%</span>
       <span class="stat-chip"><b>REG</b>${player.regen.toFixed(1)}/s</span>
       <span class="stat-chip"><b>XP</b>x${xpMultiplier().toFixed(2)}</span>
-      ${player.evolution ? `<span class="stat-chip"><b>EVO</b>${player.evolutionName}</span>` : ""}
-      ${mutationChips || `<span class="stat-chip mutation"><b>MUT</b>none</span>`}
+      ${player.evolution ? `<span class="stat-chip"><b>EVO</b>${player.evolutionName} Lv.${player.evolutionLevel}/3</span>` : ""}
+      ${mutationChips || `<span class="stat-chip mutation"><i>?</i><b>0</b></span>`}
     `;
   }
 
