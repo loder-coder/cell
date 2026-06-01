@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>BIOMASS</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <canvas id="game" aria-label="BIOMASS 게임 화면"></canvas>
+
+    <div class="hud">
+      <div class="brand">BIOMASS</div>
+      <div class="meters">
+        <div class="meter">
+          <span>생체 안정도</span>
+          <i id="hpBar"></i>
+        </div>
+        <div class="meter">
+          <span>생체질량</span>
+          <i id="xpBar"></i>
+        </div>
+      </div>
+      <div class="readout">
+        <b id="levelText">1단계</b>
+        <b id="timeText">00:00</b>
+      </div>
+    </div>
+
+    <div class="pain-flash" id="painFlash"></div>
+    <div class="pause-panel hidden" id="pausePanel">
+      <div>
+        <p class="phase">PAUSED</p>
+        <h1>일시정지</h1>
+        <p>창이 비활성화되어 배양 흐름을 멈췄습니다.</p>
+        <button id="resumeButton">계속하기</button>
+      </div>
+    </div>
+    <div class="evolution-banner hidden" id="evolutionBanner">
+      <p>진화 발현</p>
+      <h2 id="evolutionText">군체 진화</h2>
+    </div>
+
+    <div class="mutations hidden" id="mutationPanel">
+      <div class="mutation-shell">
+        <p class="phase">강제 변이</p>
+        <h1 id="mutationTitle">몸이 스스로 선택한다.</h1>
+        <div class="choice-grid" id="choiceGrid"></div>
+      </div>
+    </div>
+
+    <div class="start" id="startPanel">
+      <div>
+        <h1>BIOMASS</h1>
+        <p>WASD 또는 드래그로 이동. 살아남고, 흡수하고, 처음의 형태를 버리십시오.</p>
+        <button id="startButton">배양 시작</button>
+      </div>
+    </div>
+
+    <div class="game-over hidden" id="gameOverPanel">
+      <div>
+        <p class="phase">개체 붕괴</p>
+        <h1 id="overTitle">생체질량이 정지했다.</h1>
+        <p id="overStats"></p>
+        <button id="restartButton">다시 배양</button>
+      </div>
+    </div>
+
+    <script src="game.js"></script>
+  </body>
+</html>
