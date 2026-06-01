@@ -14,6 +14,7 @@
   const xpBar = document.getElementById("xpBar");
   const levelText = document.getElementById("levelText");
   const timeText = document.getElementById("timeText");
+  const statPanel = document.getElementById("statPanel");
   const startPanel = document.getElementById("startPanel");
   const startButton = document.getElementById("startButton");
   const pausePanel = document.getElementById("pausePanel");
@@ -58,6 +59,7 @@
   let finalPhase = false;
   let finalBossSpawned = false;
   let enemyCapBonus = 0;
+  let lastStatsSignature = "";
 
   const keys = new Set();
   const enemies = [];
@@ -69,11 +71,37 @@
     spatialCandidates: 0,
   };
   const scratchEnemies = [];
+  const cullRect = { left: 0, right: 0, top: 0, bottom: 0 };
+  const viewRect = { left: 0, right: 0, top: 0, bottom: 0 };
+  const enemyProjectileHit = { kind: "phage", x: 0, y: 0 };
   const pools = { enemies: [], particles: [], projectiles: [] };
+  const perfGuard = {
+    effectScale: 1,
+    trailLimit: 9,
+    hpBarStride: 1,
+    textCooldown: 0,
+  };
+  const balance = {
+    window: 5,
+    damageTotal: 0,
+    healTotal: 0,
+    bucketStep: 0.5,
+    bucketCursor: -1,
+    damageBuckets: new Array(10).fill(0),
+    healBuckets: new Array(10).fill(0),
+    playerDps: 0,
+    playerHps: 0,
+    avgEnemyHp: 0,
+    avgEnemyDamage: 0,
+    avgTtk: 0,
+    wave: 1,
+  };
   const session = {
     tutorialMarks: [5, 10, 15],
     tutorialIndex: 0,
     finalPhaseAt: 900,
+    nextWaveAt: 180,
+    waveIndex: 0,
   };
   const camera = {
     x: 0,
@@ -129,6 +157,7 @@
     },
     trail: [],
   };
+  const cooldownKeys = Object.keys(player.cooldowns);
 
   const MAX_STACK = 5;
   const EVOLUTION_STACK = 4;
@@ -266,7 +295,7 @@
   }
 
   function enemyProgressScale() {
-    return 1 + runTime / 330 + Math.max(0, runTime - 240) / 420;
+    return 1 + runTime / 390 + Math.max(0, runTime - 240) / 620 + Math.max(0, runTime - 720) / 1200;
   }
 
   function enemyCapDifficultyScale() {
@@ -284,6 +313,21 @@
   function addEnemyCapPressure(strength = 1) {
     if (finalPhase) return;
     enemyCapBonus = clamp(enemyCapBonus + ENEMY_CAP_HP_STEP * strength, 0, ENEMY_CAP_MAX_BONUS);
+  }
+
+  function xpMultiplier() {
+    return 1 + player.absorption * 0.08 + Math.min(1.2, Math.floor(runTime / 180) * 0.12);
+  }
+
+  function updatePerformanceGuard(dt) {
+    perfGuard.textCooldown = Math.max(0, perfGuard.textCooldown - dt);
+    const timePressure = clamp((runTime - 480) / 360, 0, 1);
+    const fpsPressure = clamp((55 - perf.fps) / 18, 0, 1);
+    const objectPressure = Math.max(particles.length / MAX_PARTICLES, projectiles.length / MAX_PROJECTILES);
+    const pressure = clamp(Math.max(timePressure * 0.55, fpsPressure, objectPressure - 0.72), 0, 1);
+    perfGuard.effectScale = clamp(1 - pressure * 0.72, runtimeConfig.mobile ? 0.22 : 0.32, 1);
+    perfGuard.trailLimit = Math.max(2, Math.round(9 - pressure * 6));
+    perfGuard.hpBarStride = pressure > 0.65 ? 4 : pressure > 0.35 ? 3 : enemies.length > 110 ? 2 : 1;
   }
 
   function enemySizeScale(kind) {
@@ -382,7 +426,21 @@
     finalPhase = false;
     finalBossSpawned = false;
     enemyCapBonus = 0;
+    lastStatsSignature = "";
+    balance.damageTotal = 0;
+    balance.healTotal = 0;
+    balance.bucketCursor = -1;
+    balance.damageBuckets.fill(0);
+    balance.healBuckets.fill(0);
+    balance.playerDps = 0;
+    balance.playerHps = 0;
+    balance.avgEnemyHp = 0;
+    balance.avgEnemyDamage = 0;
+    balance.avgTtk = 0;
+    balance.wave = 1;
     session.tutorialIndex = 0;
+    session.nextWaveAt = 180;
+    session.waveIndex = 0;
     camera.x = player.x;
     camera.y = player.y;
     camera.scale = 1;
@@ -418,16 +476,14 @@
 
   function getParticle() {
     if (particles.length >= MAX_PARTICLES) {
-      const old = particles.shift();
-      if (old) release(pools.particles, old, resetParticle);
+      return null;
     }
     return acquire(pools.particles);
   }
 
   function getProjectile() {
     if (projectiles.length >= MAX_PROJECTILES) {
-      const old = projectiles.shift();
-      if (old) release(pools.projectiles, old);
+      return null;
     }
     return acquire(pools.projectiles);
   }
@@ -493,9 +549,10 @@
   }
 
   function spawnParticle(x, y, color, count, force = 1, life = 0.8) {
-    const scaledCount = Math.max(1, Math.floor(count * quality.particleScale));
+    const scaledCount = Math.max(1, Math.floor(count * quality.particleScale * perfGuard.effectScale));
     for (let i = 0; i < scaledCount; i++) {
       const p = getParticle();
+      if (!p) return;
       const a = rand(0, TAU);
       const s = rand(30, 260) * force;
       p.x = x;
@@ -514,7 +571,10 @@
   }
 
   function spawnText(x, y, text, color = "#ffe5ea") {
+    if (perfGuard.textCooldown > 0 || particles.length >= MAX_PARTICLES * 0.92) return;
+    perfGuard.textCooldown = perf.fps < 52 ? 0.16 : 0.07;
     const p = getParticle();
+    if (!p) return;
     p.x = x;
     p.y = y;
     p.vx = rand(-18, 18);
@@ -530,7 +590,9 @@
   }
 
   function spawnElectricArc(x1, y1, x2, y2, color = "#8fffd3") {
+    if (perfGuard.effectScale < 0.55 && Math.random() < 0.45) return;
     const p = getParticle();
+    if (!p) return;
     p.x = x1;
     p.y = y1;
     p.x2 = x2;
@@ -548,6 +610,7 @@
 
   function spawnToxicZone(x, y, power = 1) {
     const p = getParticle();
+    if (!p) return;
     p.x = x;
     p.y = y;
     p.vx = 0;
@@ -565,6 +628,7 @@
 
   function spawnMassWave(power = 1) {
     const p = getParticle();
+    if (!p) return;
     p.x = player.x;
     p.y = player.y;
     p.vx = 0;
@@ -579,6 +643,16 @@
     if (!p.hitTargets) p.hitTargets = new Set();
     else p.hitTargets.clear();
     particles.push(p);
+  }
+
+  function pushTrailPoint(trail, x, y, life, radius, maxLength) {
+    let point = trail.length >= maxLength ? trail.pop() : null;
+    if (!point) point = {};
+    point.x = x;
+    point.y = y;
+    point.life = life;
+    if (radius !== undefined) point.r = radius;
+    trail.unshift(point);
   }
 
   function initAudio() {
@@ -655,6 +729,7 @@
 
   function fireProjectileAngle(kind, x, y, angle, power) {
     const p = getProjectile();
+    if (!p) return false;
     const enemyShot = kind === "phageNeedle" || kind === "phageWave";
     p.kind = kind;
     p.owner = enemyShot ? "enemy" : "player";
@@ -677,6 +752,7 @@
       p.hitTargets.clear();
     }
     projectiles.push(p);
+    return true;
   }
 
   function nearestEnemy(range = 9999) {
@@ -709,6 +785,111 @@
     return scratchEnemies;
   }
 
+  function syncBalanceBucket() {
+    const cursor = Math.floor(runTime / balance.bucketStep);
+    if (balance.bucketCursor === cursor) return;
+    if (balance.bucketCursor < 0 || cursor - balance.bucketCursor >= balance.damageBuckets.length) {
+      balance.damageBuckets.fill(0);
+      balance.healBuckets.fill(0);
+    } else {
+      for (let step = balance.bucketCursor + 1; step <= cursor; step++) {
+        const index = step % balance.damageBuckets.length;
+        balance.damageBuckets[index] = 0;
+        balance.healBuckets[index] = 0;
+      }
+    }
+    balance.bucketCursor = cursor;
+  }
+
+  function sumBalanceWindow(buckets) {
+    let total = 0;
+    for (let i = 0; i < buckets.length; i++) total += buckets[i];
+    return total;
+  }
+
+  function recordDamage(amount) {
+    if (amount <= 0) return;
+    syncBalanceBucket();
+    balance.damageBuckets[balance.bucketCursor % balance.damageBuckets.length] += amount;
+  }
+
+  function healPlayer(amount) {
+    if (amount <= 0 || player.hp >= player.maxHp) return 0;
+    const before = player.hp;
+    player.hp = Math.min(player.maxHp, player.hp + amount);
+    const healed = player.hp - before;
+    syncBalanceBucket();
+    balance.healBuckets[balance.bucketCursor % balance.healBuckets.length] += healed;
+    return healed;
+  }
+
+  function healPlayerFromKill(amount) {
+    updateBalanceMetrics();
+    const hpsCap = 8 + player.absorption * 4.2 + (player.evolution === "swarmOrganism" ? 8 : 0);
+    const remainingBudget = Math.max(0, hpsCap * balance.window - balance.healTotal);
+    return healPlayer(Math.min(amount, remainingBudget));
+  }
+
+  function estimatePlayerDps() {
+    const haste = player.attackSpeed;
+    let dps = (10 + player.level * 0.9) / (0.42 / haste);
+    if (player.tentacles) {
+      const evolved = player.evolution === "electricTentacles";
+      const hits = Math.min(player.tentacles + (evolved ? 4 : 0), evolved ? 10 : 5);
+      dps += hits * (17 + player.tentacles * 5 + (evolved ? 18 : 0)) / ((evolved ? 0.62 : 0.86) / haste);
+      if (evolved) dps += hits * (9 + player.electric * 4) * 1.8 / (0.62 / haste);
+    }
+    if (player.acid) dps += (15 + player.acid * 8) / ((player.evolution === "toxicHive" ? 0.82 : 1.05) / haste) * (player.evolution === "toxicHive" ? 3 : 1);
+    if (player.spores && player.evolution !== "toxicHive") dps += (player.spores + 1) * (8 + player.spores * 4) / (1.65 / haste);
+    if (player.electric && player.evolution !== "electricTentacles") dps += (1 + player.electric) * (14 + player.electric * 7) / (1.25 / haste);
+    if (player.splitting) {
+      if (player.evolution === "swarmOrganism") dps += (18 + player.splitting * 5) * (9 + (player.splitting + player.absorption) * 3.2) * 0.48 / (0.52 / haste);
+      else dps += (12 + player.splitting * 6) / (0.68 / haste);
+    }
+    if (player.evolution === "immortalMass") dps += (28 + (player.shell + player.regen) * 9) * 5 / (1.55 / haste);
+    if (player.evolution === "toxicHive") dps += (4 + Math.min(6, player.acid + player.spores)) * (18 + (player.acid + player.spores) * 5) * 0.9;
+    return dps;
+  }
+
+  function estimateAverageEnemyStats() {
+    const scale = enemyProgressScale() * enemyCapDifficultyScale();
+    const damageScale = (1 + runTime / 680) * enemyCapDamageScale();
+    const weights = [
+      ["cell", 0.46],
+      ["parasite", runTime > 0 ? 0.28 : 0],
+      ["toxic", runTime > 115 ? 0.16 : 0],
+      ["splitter", runTime > 185 ? 0.08 : 0],
+      ["giant", runTime > 330 ? 0.02 : 0],
+    ];
+    let weightTotal = 0;
+    let hp = 0;
+    let damage = 0;
+    for (const [kind, weight] of weights) {
+      if (weight <= 0) continue;
+      const type = enemyTypes[kind];
+      weightTotal += weight;
+      hp += type.hp * 1.18 * scale * weight;
+      damage += type.damage * damageScale * weight;
+    }
+    if (!weightTotal) return { hp: enemyTypes.cell.hp * scale, damage: enemyTypes.cell.damage * damageScale };
+    return { hp: hp / weightTotal, damage: damage / weightTotal };
+  }
+
+  function updateBalanceMetrics() {
+    balance.wave = Math.floor(runTime / 60) + 1;
+    syncBalanceBucket();
+    balance.damageTotal = sumBalanceWindow(balance.damageBuckets);
+    balance.healTotal = sumBalanceWindow(balance.healBuckets);
+    const measuredDps = balance.damageTotal / balance.window;
+    const estimatedDps = estimatePlayerDps();
+    balance.playerDps = measuredDps > 1 ? measuredDps : estimatedDps;
+    balance.playerHps = balance.healTotal / balance.window;
+    const enemyStats = estimateAverageEnemyStats();
+    balance.avgEnemyHp = enemyStats.hp;
+    balance.avgEnemyDamage = enemyStats.damage;
+    balance.avgTtk = balance.playerDps > 0 ? balance.avgEnemyHp / balance.playerDps : Infinity;
+  }
+
   function damageEnemy(enemy, damage, color = "#ff416d", knock = 0, source = "attack") {
     if (enemy.components && enemy.components.collision && enemy.components.collision.attackImmune && source !== "contact") {
       enemy.hit = 0.12;
@@ -716,7 +897,9 @@
       spawnText(enemy.x, enemy.y - enemy.radius, "IMMUNE", "#d4fff0");
       return false;
     }
+    const beforeHp = enemy.hp;
     enemy.hp -= damage;
+    if (source !== "contact") recordDamage(Math.max(0, Math.min(beforeHp, damage)));
     enemy.hit = 0.22;
     if (enemy.components && enemy.components.render) enemy.components.render.flash = 0.2;
     enemy.pulse = 1;
@@ -779,13 +962,14 @@
       return;
     }
     player.kills++;
-    player.xp += enemy.xp * (1 + player.absorption * 0.08);
+    player.xp += enemy.xp * xpMultiplier();
     const swarmHeal = player.evolution === "swarmOrganism" ? 6 : 0;
-    player.hp = Math.min(player.maxHp, player.hp + player.absorption * 2.5 + swarmHeal);
+    healPlayerFromKill(player.absorption * 1.9 + swarmHeal);
     shake = Math.max(shake, enemy.radius * 0.07);
     spawnParticle(enemy.x, enemy.y, enemy.color, enemy.kind === "giant" ? 42 : 13, enemy.kind === "giant" ? 1.7 : 1, 1.1);
     for (let i = 0; i < 8 + player.absorption * 3; i++) {
       const p = getParticle();
+      if (!p) break;
       p.x = enemy.x;
       p.y = enemy.y;
       p.vx = (player.x - enemy.x) * rand(0.9, 1.6);
@@ -948,18 +1132,21 @@
     }
     if (hitStop > 0) {
       updateParticles(dt * 0.35);
+      updatePerformanceGuard(dt);
       updateHud();
       return;
     }
 
     runTime += dt;
+    updatePerformanceGuard(dt);
     updateCamera(dt);
     updateSession();
     spawnTimer -= dt;
     bossTimer -= dt;
-    Object.keys(player.cooldowns).forEach((key) => {
+    for (let i = 0; i < cooldownKeys.length; i++) {
+      const key = cooldownKeys[i];
       player.cooldowns[key] = Math.max(0, player.cooldowns[key] - dt);
-    });
+    }
 
     const pressure = 1.25 + runTime / 120;
     if (!finalPhase && spawnTimer <= 0) {
@@ -983,6 +1170,7 @@
     enemyGrid.rebuild(enemies);
     updateProjectiles(dt);
     updateParticles(dt);
+    updateBalanceMetrics();
     updateHud();
     if (player.hp <= 0) endRun();
   }
@@ -991,6 +1179,11 @@
     while (session.tutorialIndex < session.tutorialMarks.length && runTime >= session.tutorialMarks[session.tutorialIndex]) {
       spawnEnemy("tutorial");
       session.tutorialIndex++;
+    }
+    while (!finalPhase && session.nextWaveAt < session.finalPhaseAt && runTime >= session.nextWaveAt) {
+      session.waveIndex++;
+      spawnWave(session.waveIndex);
+      session.nextWaveAt += 180;
     }
     if (!finalPhase && runTime >= session.finalPhaseAt) {
       finalPhase = true;
@@ -1007,6 +1200,33 @@
         shake = Math.max(shake, 24);
       }
     }
+  }
+
+  function spawnWave(waveIndex) {
+    const spawnBudget = Math.min(MAX_ENEMIES - enemies.length, 14 + waveIndex * 4);
+    if (spawnBudget <= 0) {
+      addEnemyCapPressure(1.2);
+      return;
+    }
+    const heavyCount = Math.min(4 + Math.floor(waveIndex / 2), Math.floor(spawnBudget * 0.32));
+    const splitterCount = runTime > 185 ? Math.min(5, Math.floor(spawnBudget * 0.22)) : 0;
+    const toxicCount = runTime > 115 ? Math.min(6, Math.floor(spawnBudget * 0.24)) : 0;
+    const parasiteCount = Math.max(0, Math.floor(spawnBudget * 0.28));
+    let spawned = 0;
+
+    for (let i = 0; i < heavyCount && spawned < spawnBudget; i++, spawned++) spawnEnemy(waveIndex >= 2 && i === 0 ? "giant" : "cell");
+    for (let i = 0; i < splitterCount && spawned < spawnBudget; i++, spawned++) spawnEnemy("splitter");
+    for (let i = 0; i < toxicCount && spawned < spawnBudget; i++, spawned++) spawnEnemy("toxic");
+    for (let i = 0; i < parasiteCount && spawned < spawnBudget; i++, spawned++) spawnEnemy("parasite");
+    while (spawned < spawnBudget) {
+      spawnEnemy(spawned % 3 === 0 ? "parasite" : "cell");
+      spawned++;
+    }
+
+    spawnTimer = Math.min(spawnTimer, 0.42);
+    screenPulse = Math.max(screenPulse, 0.34);
+    shake = Math.max(shake, 8);
+    spawnText(player.x, player.y - player.radius - 34, `WAVE ${waveIndex}`, "#d4fff0");
   }
 
   function updatePlayer(dt) {
@@ -1032,10 +1252,9 @@
     player.vy += (iy * player.speed * dashBoost - player.vy) * clamp(dt * player.acceleration, 0, 1);
     player.x += player.vx * dt;
     player.y += player.vy * dt;
-    player.hp = Math.min(player.maxHp, player.hp + player.regen * dt);
+    healPlayer(player.regen * dt);
     player.mutationPulse = Math.max(0, player.mutationPulse - dt * 1.6);
-    player.trail.unshift({ x: player.x, y: player.y, life: 1, r: player.radius * 0.75 });
-    if (player.trail.length > 48 + player.slime * 18) player.trail.pop();
+    pushTrailPoint(player.trail, player.x, player.y, 1, player.radius * 0.75, 48 + player.slime * 18);
     for (const t of player.trail) t.life -= dt * (player.slime ? 0.7 : 1.7);
   }
 
@@ -1105,7 +1324,7 @@
     if (player.splitting && player.cooldowns.split <= 0) {
       const evolved = player.evolution === "swarmOrganism";
       if (evolved) {
-        const count = 18 + player.splitting * 5;
+        const count = Math.max(10, Math.floor((18 + player.splitting * 5) * clamp(perfGuard.effectScale + 0.18, 0.45, 1)));
         const base = pulse * 3.6;
         for (let i = 0; i < count; i++) {
           fireProjectileAngle("swarmShard", player.x, player.y, base + (i / count) * TAU, player.splitting + player.absorption);
@@ -1133,7 +1352,7 @@
 
     if (player.evolution === "toxicHive") {
       if (player.cooldowns.toxin <= 0) {
-        const zones = 4 + Math.min(6, player.acid + player.spores);
+        const zones = Math.max(2, Math.floor((4 + Math.min(6, player.acid + player.spores)) * clamp(perfGuard.effectScale + 0.12, 0.45, 1)));
         const left = camera.x - (width / 2) / camera.scale;
         const right = camera.x + (width / 2) / camera.scale;
         const top = camera.y - (height / 2) / camera.scale;
@@ -1239,8 +1458,7 @@
     for (let i = projectiles.length - 1; i >= 0; i--) {
       const p = projectiles[i];
       p.life -= dt;
-      p.trail.unshift({ x: p.x, y: p.y, life: 1 });
-      if (p.trail.length > 9) p.trail.pop();
+      pushTrailPoint(p.trail, p.x, p.y, 1, undefined, perfGuard.trailLimit);
       for (const t of p.trail) t.life -= dt * 4.2;
       p.x += p.vx * dt;
       p.y += p.vy * dt;
@@ -1251,7 +1469,9 @@
       let used = false;
       if (p.owner === "enemy") {
         if ((p.x - player.x) ** 2 + (p.y - player.y) ** 2 < (p.radius + player.radius) ** 2) {
-          damagePlayer(p.damage, { kind: "phage", x: p.x, y: p.y });
+          enemyProjectileHit.x = p.x;
+          enemyProjectileHit.y = p.y;
+          damagePlayer(p.damage, enemyProjectileHit);
           used = true;
         }
       } else {
@@ -1295,12 +1515,10 @@
   }
 
   function updateParticles(dt) {
-    const visibleRect = {
-      left: camera.x - (width / 2) / camera.scale - 260,
-      right: camera.x + (width / 2) / camera.scale + 260,
-      top: camera.y - (height / 2) / camera.scale - 260,
-      bottom: camera.y + (height / 2) / camera.scale + 260,
-    };
+    cullRect.left = camera.x - (width / 2) / camera.scale - 260;
+    cullRect.right = camera.x + (width / 2) / camera.scale + 260;
+    cullRect.top = camera.y - (height / 2) / camera.scale - 260;
+    cullRect.bottom = camera.y + (height / 2) / camera.scale + 260;
     for (let i = particles.length - 1; i >= 0; i--) {
       const p = particles[i];
       p.life -= dt;
@@ -1333,7 +1551,7 @@
       p.vx *= 0.96;
       p.vy *= 0.96;
       const cullOffscreen = p.kind === "splash" || p.kind === "text" || p.kind === "absorb" || p.kind === "electricArc";
-      if (p.life <= 0 || (cullOffscreen && isOutsideRect(p, visibleRect, 80))) {
+      if (p.life <= 0 || (cullOffscreen && isOutsideRect(p, cullRect, 80))) {
         recycleParticleAt(i);
       }
     }
@@ -1342,6 +1560,10 @@
 
   function draw() {
     perf.drawCalls = 0;
+    viewRect.left = camera.x - (width / 2) / camera.scale - 120;
+    viewRect.right = camera.x + (width / 2) / camera.scale + 120;
+    viewRect.top = camera.y - (height / 2) / camera.scale - 120;
+    viewRect.bottom = camera.y + (height / 2) / camera.scale + 120;
     const sx = shake ? rand(-shake, shake) : 0;
     const sy = shake ? rand(-shake, shake) : 0;
     ctx.save();
@@ -1368,6 +1590,7 @@
     const effects = countEffects(particles);
     const lines = [
       `FPS: ${Math.round(perf.fps)}`,
+      `Wave: ${balance.wave}`,
       `Enemies: ${enemies.length} / ${MAX_ENEMIES}`,
       `Projectiles: ${projectiles.length}`,
       `Particles: ${particles.length} / ${MAX_PARTICLES}`,
@@ -1376,11 +1599,18 @@
       `Memory: ${readMemoryUsage()}`,
       `Active Mutations: ${activeMutationCount(player)}`,
       `Enemy Cap: ${MAX_ENEMIES} (${runtimeConfig.mobile ? "Mobile" : "PC"})`,
+      `Enemy HP: ${Math.round(balance.avgEnemyHp)}`,
+      `Enemy Damage: ${balance.avgEnemyDamage.toFixed(1)}`,
+      `Player DPS: ${balance.playerDps.toFixed(1)}`,
+      `Player HPS: ${balance.playerHps.toFixed(1)}`,
+      `Average TTK: ${balance.avgTtk === Infinity ? "n/a" : `${balance.avgTtk.toFixed(2)}s`}`,
+      `FX Scale: ${perfGuard.effectScale.toFixed(2)}`,
+      `Trail: ${perfGuard.trailLimit}`,
     ];
     if (enemyCapBonus > 0) lines.push(`Cap Scaling: +${Math.round(enemyCapBonus * 100)}%`);
     const x = 14;
-    const y = height - 18 - lines.length * 18;
-    const w = 238;
+    const y = Math.max(14, height - 18 - lines.length * 18);
+    const w = 248;
     const h = lines.length * 18 + 14;
 
     ctx.save();
@@ -1693,7 +1923,9 @@
   }
 
   function drawEnemies() {
-    for (const enemy of enemies) {
+    for (let enemyIndex = 0; enemyIndex < enemies.length; enemyIndex++) {
+      const enemy = enemies[enemyIndex];
+      if (isOutsideRect(enemy, viewRect, enemy.radius * 2)) continue;
       ctx.save();
       ctx.translate(enemy.x, enemy.y);
       ctx.shadowBlur = (enemy.hit ? 22 : 12) * quality.shadowScale;
@@ -1747,7 +1979,7 @@
         perf.drawCalls++;
       }
       ctx.restore();
-      drawEnemyHpBar(enemy);
+      if (enemy.kind === "phage" || enemy.hit > 0 || enemyIndex % perfGuard.hpBarStride === 0) drawEnemyHpBar(enemy);
     }
     ctx.globalAlpha = 1;
   }
@@ -1773,6 +2005,7 @@
 
   function drawProjectiles() {
     for (const p of projectiles) {
+      if (isOutsideRect(p, viewRect, 220)) continue;
       if (p.trail && p.trail.length) {
         ctx.lineCap = "round";
         for (let i = 0; i < p.trail.length - 1; i++) {
@@ -1813,6 +2046,7 @@
   function drawParticles() {
     ctx.globalCompositeOperation = "lighter";
     for (const p of particles) {
+      if ((p.kind === "splash" || p.kind === "absorb" || p.kind === "electricArc") && isOutsideRect(p, viewRect, 80)) continue;
       const alpha = clamp(p.life / p.maxLife, 0, 1);
       ctx.globalAlpha = alpha;
       if (p.kind === "text") {
@@ -1901,6 +2135,62 @@
     const m = Math.floor(runTime / 60).toString().padStart(2, "0");
     const s = Math.floor(runTime % 60).toString().padStart(2, "0");
     timeText.textContent = `${m}:${s}`;
+    updateStatPanel();
+  }
+
+  function updateStatPanel() {
+    if (!statPanel) return;
+    const signature = [
+      Math.floor(runTime * 2),
+      player.level,
+      Math.round(player.hp),
+      Math.round(player.maxHp),
+      Math.round(player.attackSpeed * 100),
+      Math.round(player.armor * 100),
+      Math.round(player.regen * 10),
+      Math.round(xpMultiplier() * 100),
+      player.tentacles,
+      player.acid,
+      player.electric,
+      player.spores,
+      player.eyes,
+      player.shell,
+      player.splitting,
+      player.absorption,
+      player.slime,
+      player.dash,
+      player.accelStack,
+      player.evolution,
+    ].join("|");
+    if (signature === lastStatsSignature) return;
+    lastStatsSignature = signature;
+
+    const mutationChips = [
+      ["TEN", player.tentacles],
+      ["ACD", player.acid],
+      ["ELC", player.electric],
+      ["SPO", player.spores],
+      ["EYE", player.eyes],
+      ["SHL", player.shell],
+      ["SPL", player.splitting],
+      ["ABS", player.absorption],
+      ["SLM", player.slime],
+      ["DSH", player.dash],
+      ["SPD", player.accelStack],
+    ]
+      .filter(([, value]) => value > 0)
+      .map(([label, value]) => `<span class="stat-chip mutation"><b>${label}</b>${value}</span>`)
+      .join("");
+
+    statPanel.innerHTML = `
+      <span class="stat-chip"><b>HP</b>${Math.round(player.hp)}/${Math.round(player.maxHp)}</span>
+      <span class="stat-chip"><b>AS</b>${player.attackSpeed.toFixed(2)}</span>
+      <span class="stat-chip"><b>ARM</b>${Math.round(player.armor * 100)}%</span>
+      <span class="stat-chip"><b>REG</b>${player.regen.toFixed(1)}/s</span>
+      <span class="stat-chip"><b>XP</b>x${xpMultiplier().toFixed(2)}</span>
+      ${player.evolution ? `<span class="stat-chip"><b>EVO</b>${player.evolutionName}</span>` : ""}
+      ${mutationChips || `<span class="stat-chip mutation"><b>MUT</b>none</span>`}
+    `;
   }
 
   function endRun() {

@@ -3,11 +3,21 @@ class SpatialHash {
   constructor(cellSize = 220) {
     this.cellSize = cellSize;
     this.cells = new Map();
+    this.activeKeys = [];
+    this.bucketPool = [];
     this.queryStamp = 1;
   }
 
   clear() {
-    this.cells.clear();
+    for (let i = 0; i < this.activeKeys.length; i++) {
+      const key = this.activeKeys[i];
+      const bucket = this.cells.get(key);
+      if (!bucket) continue;
+      bucket.length = 0;
+      this.bucketPool.push(bucket);
+      this.cells.delete(key);
+    }
+    this.activeKeys.length = 0;
   }
 
   rebuild(items) {
@@ -26,8 +36,9 @@ class SpatialHash {
         const key = `${x},${y}`;
         let bucket = this.cells.get(key);
         if (!bucket) {
-          bucket = [];
+          bucket = this.bucketPool.pop() || [];
           this.cells.set(key, bucket);
+          this.activeKeys.push(key);
         }
         bucket.push(item);
       }
