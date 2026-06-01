@@ -1,4 +1,13 @@
 (() => {
+  const { BGM_PATH, ENEMY_BEHAVIORS, ENEMY_CAP_HP_STEP, ENEMY_CAP_MAX_BONUS, TAU } = globalThis.CellConstants;
+  const { angleDelta, clamp, dist2, isOutsideRect, rand } = globalThis.CellUtils;
+  const { createRuntimeConfig } = globalThis.CellPlatform;
+  const { SpatialHash } = globalThis.CellSpatial;
+  const { acquire, release } = globalThis.CellObjectPool;
+  const { countEffects, resetParticle } = globalThis.CellParticleSystem;
+  const { applyEnemyBehavior } = globalThis.CellEnemyBehaviors;
+  const { activeMutationCount, readMemoryUsage } = globalThis.CellDebug;
+  const { applyMutationLabel } = globalThis.CellMutationRegistry;
   const canvas = document.getElementById("game");
   const ctx = canvas.getContext("2d");
   const hpBar = document.getElementById("hpBar");
@@ -20,19 +29,12 @@
   const evolutionBanner = document.getElementById("evolutionBanner");
   const evolutionText = document.getElementById("evolutionText");
 
-  const TAU = Math.PI * 2;
-  const MAX_ENEMIES = 150;
-  const ENEMY_CAP_HP_STEP = 0.05;
-  const ENEMY_CAP_MAX_BONUS = 3;
-  const BGM_PATH = "assets/audio/bgm.mp3";
-  const rand = (min, max) => min + Math.random() * (max - min);
-  const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
-  const dist2 = (a, b) => {
-    const dx = a.x - b.x;
-    const dy = a.y - b.y;
-    return dx * dx + dy * dy;
-  };
-  const angleDelta = (a, b) => Math.atan2(Math.sin(a - b), Math.cos(a - b));
+  const runtimeConfig = createRuntimeConfig();
+  const quality = runtimeConfig.quality;
+  const MAX_ENEMIES = quality.maxEnemies;
+  const MAX_PARTICLES = quality.maxParticles;
+  const MAX_PROJECTILES = quality.maxProjectiles;
+  const enemyGrid = new SpatialHash(quality.spatialCellSize);
 
   let width = 0;
   let height = 0;
@@ -63,7 +65,10 @@
   const projectiles = [];
   const perf = {
     fps: 60,
+    drawCalls: 0,
+    spatialCandidates: 0,
   };
+  const scratchEnemies = [];
   const pools = { enemies: [], particles: [], projectiles: [] };
   const session = {
     tutorialMarks: [5, 10, 15],
@@ -244,16 +249,16 @@
   };
 
   evolutionDefs.forEach((evo) => Object.assign(evo, evolutionLabels[evo.id]));
-  mutations.forEach((mutation) => Object.assign(mutation, mutationLabels[mutation.id]));
+  mutations.forEach((mutation) => applyMutationLabel(mutation, mutationLabels));
 
   const enemyTypes = {
-    cell: { hp: 10, speed: 64, radius: 12, damage: 7, xp: 2, color: "#d12d55" },
-    parasite: { hp: 7, speed: 128, radius: 8, damage: 5, xp: 2, color: "#8fffd3" },
-    toxic: { hp: 16, speed: 50, radius: 14, damage: 11, xp: 4, color: "#b6ff4b" },
-    splitter: { hp: 22, speed: 48, radius: 16, damage: 9, xp: 5, color: "#ff7b3f" },
-    giant: { hp: 112, speed: 34, radius: 34, damage: 18, xp: 20, color: "#ff245c" },
-    tutorial: { hp: 18, speed: 36, radius: 15, damage: 0, xp: 7, color: "#d4fff0" },
-    phage: { hp: 6200, speed: 28, radius: 86, damage: 42, xp: 420, color: "#d8f0ff" },
+    cell: { hp: 10, speed: 64, radius: 12, damage: 7, xp: 2, color: "#d12d55", behavior: ENEMY_BEHAVIORS.CHASER },
+    parasite: { hp: 7, speed: 128, radius: 8, damage: 5, xp: 2, color: "#8fffd3", behavior: ENEMY_BEHAVIORS.DASHER },
+    toxic: { hp: 16, speed: 50, radius: 14, damage: 11, xp: 4, color: "#b6ff4b", behavior: ENEMY_BEHAVIORS.CHASER },
+    splitter: { hp: 22, speed: 48, radius: 16, damage: 9, xp: 5, color: "#ff7b3f", behavior: ENEMY_BEHAVIORS.CHASER },
+    giant: { hp: 112, speed: 34, radius: 34, damage: 18, xp: 20, color: "#ff245c", behavior: ENEMY_BEHAVIORS.CHASER },
+    tutorial: { hp: 18, speed: 36, radius: 15, damage: 0, xp: 7, color: "#d4fff0", behavior: ENEMY_BEHAVIORS.CHASER },
+    phage: { hp: 6200, speed: 28, radius: 86, damage: 42, xp: 420, color: "#d8f0ff", behavior: ENEMY_BEHAVIORS.RANGED },
   };
 
   function playerScaleFactor() {
@@ -404,19 +409,40 @@
   }
 
   function getEnemy() {
-    return pools.enemies.pop() || {};
+    return acquire(pools.enemies);
   }
 
   function freeEnemy(enemy) {
-    pools.enemies.push(enemy);
+    release(pools.enemies, enemy);
   }
 
   function getParticle() {
-    return pools.particles.pop() || {};
+    if (particles.length >= MAX_PARTICLES) {
+      const old = particles.shift();
+      if (old) release(pools.particles, old, resetParticle);
+    }
+    return acquire(pools.particles);
   }
 
   function getProjectile() {
-    return pools.projectiles.pop() || {};
+    if (projectiles.length >= MAX_PROJECTILES) {
+      const old = projectiles.shift();
+      if (old) release(pools.projectiles, old);
+    }
+    return acquire(pools.projectiles);
+  }
+
+  function recycleParticleAt(index) {
+    const p = particles.splice(index, 1)[0];
+    if (!p) return;
+    release(pools.particles, p, resetParticle);
+  }
+
+  function recycleProjectileAt(index) {
+    const p = projectiles.splice(index, 1)[0];
+    if (!p) return;
+    if (p.hitTargets) p.hitTargets.clear();
+    release(pools.projectiles, p);
   }
 
   function spawnEnemy(kind) {
@@ -454,6 +480,7 @@
     enemy.speed = type.speed * (1.08 + runTime / 620) * enemyCapSpeedScale();
     enemy.baseRadius = type.radius;
     enemy.baseDamage = type.damage;
+    enemy.behavior = type.behavior || ENEMY_BEHAVIORS.CHASER;
     enemy.radius = type.radius * sizeScale;
     enemy.damage = type.damage * damageScale;
     enemy.xp = type.xp;
@@ -466,7 +493,8 @@
   }
 
   function spawnParticle(x, y, color, count, force = 1, life = 0.8) {
-    for (let i = 0; i < count; i++) {
+    const scaledCount = Math.max(1, Math.floor(count * quality.particleScale));
+    for (let i = 0; i < scaledCount; i++) {
       const p = getParticle();
       const a = rand(0, TAU);
       const s = rand(30, 260) * force;
@@ -477,8 +505,10 @@
       p.life = rand(life * 0.45, life);
       p.maxLife = p.life;
       p.radius = rand(1.5, 5.5) * force;
-    p.color = color;
+      p.color = color;
       p.kind = "splash";
+      p.text = "";
+      p.hitTargets = null;
       particles.push(p);
     }
   }
@@ -495,6 +525,7 @@
     p.color = color;
     p.text = text;
     p.kind = "text";
+    p.hitTargets = null;
     particles.push(p);
   }
 
@@ -511,6 +542,7 @@
     p.radius = rand(4, 8);
     p.color = color;
     p.kind = "electricArc";
+    p.hitTargets = null;
     particles.push(p);
   }
 
@@ -527,6 +559,7 @@
     p.damage = 18 + power * 5;
     p.color = "#caff55";
     p.kind = "toxicZone";
+    p.hitTargets = null;
     particles.push(p);
   }
 
@@ -543,7 +576,8 @@
     p.damage = 28 + power * 9;
     p.color = "#ffd3dc";
     p.kind = "massWave";
-    p.hitTargets = new Set();
+    if (!p.hitTargets) p.hitTargets = new Set();
+    else p.hitTargets.clear();
     particles.push(p);
   }
 
@@ -570,7 +604,7 @@
       bgm.volume = 0.42;
     }
     bgm.play().catch(() => {
-      console.info(`[BIOMASS] 배경음 파일을 찾지 못했거나 재생이 차단되었습니다: ${BGM_PATH}`);
+      console.info(`[CELL] 배경음 파일을 찾지 못했거나 재생이 차단되었습니다: ${BGM_PATH}`);
     });
   }
 
@@ -634,30 +668,45 @@
     p.life = kind === "swarmShard" ? 2.2 : kind === "spore" ? 3.4 : kind === "shard" ? 0.9 : kind === "bite" ? 0.52 : kind === "phageNeedle" ? 3.2 : kind === "phageWave" ? 4.2 : 1.35;
     p.maxLife = p.life;
     p.color = kind === "swarmShard" ? "#ff89a1" : kind === "acid" ? "#caff55" : kind === "shard" ? "#ffd3dc" : kind === "bite" ? "#ff89a1" : enemyShot ? "#d8f0ff" : "#8fffd3";
-    p.trail = [];
-    p.hitTargets = kind === "swarmShard" ? new Set() : null;
+    if (!p.trail) p.trail = [];
+    else p.trail.length = 0;
+    if (kind === "swarmShard") {
+      if (!p.hitTargets) p.hitTargets = new Set();
+      else p.hitTargets.clear();
+    } else if (p.hitTargets) {
+      p.hitTargets.clear();
+    }
     projectiles.push(p);
   }
 
   function nearestEnemy(range = 9999) {
     let best = null;
     let bestD = range * range;
-    for (const enemy of enemies) {
+    perf.spatialCandidates = 0;
+    enemyGrid.forEachInCircle(player.x, player.y, range, (enemy) => {
+      perf.spatialCandidates++;
       const d = dist2(player, enemy);
       if (d < bestD) {
         best = enemy;
         bestD = d;
       }
-    }
+    });
     return best;
   }
 
   function sortedEnemiesInRange(range, limit = enemies.length) {
     const range2 = range * range;
-    return enemies
-      .filter((enemy) => dist2(player, enemy) <= range2)
-      .sort((a, b) => dist2(player, a) - dist2(player, b))
-      .slice(0, limit);
+    scratchEnemies.length = 0;
+    enemyGrid.forEachInCircle(player.x, player.y, range, (enemy) => {
+      const d = dist2(player, enemy);
+      if (d <= range2) {
+        enemy._queryD = d;
+        scratchEnemies.push(enemy);
+      }
+    });
+    scratchEnemies.sort((a, b) => a._queryD - b._queryD);
+    if (scratchEnemies.length > limit) scratchEnemies.length = limit;
+    return scratchEnemies;
   }
 
   function damageEnemy(enemy, damage, color = "#ff416d", knock = 0, source = "attack") {
@@ -832,7 +881,7 @@
     playSound("card");
     mutation.apply();
     const after = stackOf(mutation.id);
-    console.debug(`[BIOMASS] 변이 선택: ${mutation.name} ${before}->${after}`);
+    console.debug(`[CELL] 변이 선택: ${mutation.name} ${before}->${after}`);
     player.radius += 2.4;
     player.maxHp += 4;
     player.hp = Math.min(player.maxHp, player.hp + 18);
@@ -856,7 +905,7 @@
     const old = player.evolution;
     for (const evo of evolutionDefs) {
       const ready = evo.needs.every((id) => stackOf(id) >= EVOLUTION_STACK);
-      console.debug(`[BIOMASS] 진화 검증: ${evo.name} ${ready ? "가능" : "미충족"}`);
+      console.debug(`[CELL] 진화 검증: ${evo.name} ${ready ? "가능" : "미충족"}`);
       if (ready && !player.evolution) {
         player.evolution = evo.id;
         player.evolutionName = evo.name;
@@ -877,7 +926,7 @@
       evolutionText.textContent = player.evolutionName;
       evolutionBanner.classList.remove("hidden");
       playSound("evolve");
-      console.debug(`[BIOMASS] 진화 발현: ${player.evolutionName}`);
+      console.debug(`[CELL] 진화 발현: ${player.evolutionName}`);
     }
   }
 
@@ -887,7 +936,7 @@
     playerHurt = Math.max(0, playerHurt - dt * 3.8);
     screenPulse = Math.max(0, screenPulse - dt * 1.6);
     bannerTimer = Math.max(0, bannerTimer - dt);
-    if (painFlash) painFlash.style.opacity = Math.max(playerHurt, screenPulse * 0.45).toFixed(3);
+    if (painFlash) painFlash.style.opacity = (Math.max(playerHurt, screenPulse * 0.45) * quality.screenEffectScale).toFixed(3);
     if (bannerTimer <= 0) evolutionBanner.classList.add("hidden");
     if (state === "paused") {
       updateHud();
@@ -927,9 +976,11 @@
       bossTimer = Math.max(30, 68 - runTime / 20);
     }
 
+    enemyGrid.rebuild(enemies);
     updatePlayer(dt);
     updateAttacks(dt);
     updateEnemies(dt);
+    enemyGrid.rebuild(enemies);
     updateProjectiles(dt);
     updateParticles(dt);
     updateHud();
@@ -1012,7 +1063,7 @@
             const tipX = player.x + Math.cos(angle) * Math.min(range, Math.hypot(target.x - player.x, target.y - player.y) * 0.72);
             const tipY = player.y + Math.sin(angle) * Math.min(range, Math.hypot(target.x - player.x, target.y - player.y) * 0.72);
             spawnElectricArc(tipX, tipY, target.x, target.y);
-            enemies.slice(0, 90).forEach((near) => {
+            enemyGrid.forEachInCircle(target.x, target.y, 175, (near) => {
               if (near !== target && (near.x - target.x) ** 2 + (near.y - target.y) ** 2 < 175 ** 2) {
                 damageEnemy(near, 9 + player.electric * 4, "#8fffd3", 70);
                 spawnElectricArc(target.x, target.y, near.x, near.y, "#d4fff0");
@@ -1046,13 +1097,8 @@
     if (player.electric && player.cooldowns.spark <= 0 && player.evolution !== "electricTentacles") {
       const arcs = 1 + player.electric;
       const range = electricRange();
-      enemies
-        .slice()
-        .sort((a, b) => dist2(player, a) - dist2(player, b))
-        .slice(0, arcs)
-        .forEach((enemy) => {
-          if (dist2(player, enemy) < range * range) damageEnemy(enemy, 14 + player.electric * 7, "#8fffd3", 40);
-        });
+      const targets = sortedEnemiesInRange(range, arcs);
+      for (const enemy of targets) damageEnemy(enemy, 14 + player.electric * 7, "#8fffd3", 40);
       playSound("attack");
       player.cooldowns.spark = 1.25 / haste;
     }
@@ -1069,15 +1115,10 @@
         player.cooldowns.split = 0.52 / haste;
         return;
       }
-      const targets = enemies
-        .slice()
-        .sort((a, b) => dist2(player, a) - dist2(player, b))
-        .slice(0, 1);
+      const targets = sortedEnemiesInRange(220, 1);
       for (const target of targets) {
-        if (dist2(player, target) < 220 ** 2) {
-          damageEnemy(target, 12 + player.splitting * 6, "#ffd2dc", 80);
-          spawnParticle(target.x, target.y, "#ffd2dc", 4, 0.9, 0.42);
-        }
+        damageEnemy(target, 12 + player.splitting * 6, "#ffd2dc", 80);
+        spawnParticle(target.x, target.y, "#ffd2dc", 4, 0.9, 0.42);
       }
       if (targets.length) playSound("attack");
       player.cooldowns.split = 0.68 / haste;
@@ -1126,18 +1167,7 @@
       }
       updateBoss(enemy, dt);
       const aim = enemy.components && enemy.components.movement ? enemy.components.movement : null;
-      if (enemy.kind === "parasite" && aim) {
-        aim.lockTimer -= dt;
-        const closeToLock = (enemy.x - aim.targetX) ** 2 + (enemy.y - aim.targetY) ** 2 < 24 ** 2;
-        if (aim.lockTimer <= 0 || closeToLock) {
-          aim.targetX = player.x;
-          aim.targetY = player.y;
-          aim.lockTimer = 0.85;
-        }
-      } else if (aim) {
-        aim.targetX = player.x;
-        aim.targetY = player.y;
-      }
+      if (aim) applyEnemyBehavior(enemy, player, dt);
       const targetX = aim ? aim.targetX : player.x;
       const targetY = aim ? aim.targetY : player.y;
       const a = Math.atan2(targetY - enemy.y, targetX - enemy.x);
@@ -1225,81 +1255,93 @@
           used = true;
         }
       } else {
-      for (const enemy of enemies) {
-        if (p.kind === "swarmShard" && p.hitTargets && p.hitTargets.has(enemy)) continue;
+      let hitEnemy = null;
+      enemyGrid.forEachInCircle(p.x, p.y, p.radius + 140, (enemy) => {
+        if (hitEnemy && p.kind !== "swarmShard") return;
+        if (p.kind === "swarmShard" && p.hitTargets && p.hitTargets.has(enemy)) return;
         if ((p.x - enemy.x) ** 2 + (p.y - enemy.y) ** 2 < (p.radius + enemy.radius) ** 2) {
           const applied = damageEnemy(enemy, p.damage, p.color, p.kind === "acid" ? 70 : p.kind === "bite" ? 85 : 25, "projectile");
           if (applied && p.kind === "bite") spawnParticle(p.x, p.y, "#ffedf0", 8, 0.7, 0.28);
           if (applied && p.kind === "swarmShard") {
             p.hitTargets.add(enemy);
             spawnParticle(p.x, p.y, "#ff89a1", 5, 0.55, 0.24);
-            continue;
+            return;
           }
           if (p.kind === "acid") {
             spawnParticle(p.x, p.y, "#caff55", 18, 1, 0.8);
-            if (applied) for (const near of enemies) if (near !== enemy && (p.x - near.x) ** 2 + (p.y - near.y) ** 2 < 92 ** 2) damageEnemy(near, p.damage * 0.42, "#caff55", 20, "poison");
+            if (applied) enemyGrid.forEachInCircle(p.x, p.y, 92, (near) => {
+              if (near !== enemy && (p.x - near.x) ** 2 + (p.y - near.y) ** 2 < 92 ** 2) damageEnemy(near, p.damage * 0.42, "#caff55", 20, "poison");
+            });
           }
           if (p.kind === "spore" && player.evolution === "toxicHive") {
             spawnParticle(p.x, p.y, "#caff55", 20, 0.95, 0.9);
-            if (applied) for (const near of enemies) if (near !== enemy && (p.x - near.x) ** 2 + (p.y - near.y) ** 2 < 118 ** 2) damageEnemy(near, p.damage * 0.55, "#caff55", 28, "poison");
+            if (applied) enemyGrid.forEachInCircle(p.x, p.y, 118, (near) => {
+              if (near !== enemy && (p.x - near.x) ** 2 + (p.y - near.y) ** 2 < 118 ** 2) damageEnemy(near, p.damage * 0.55, "#caff55", 28, "poison");
+            });
           }
           used = true;
-          break;
+          hitEnemy = enemy;
         }
-      }
+      });
       }
       const left = camera.x - (width / 2) / camera.scale - 160;
       const right = camera.x + (width / 2) / camera.scale + 160;
       const top = camera.y - (height / 2) / camera.scale - 160;
       const bottom = camera.y + (height / 2) / camera.scale + 160;
       if (used || p.life <= 0 || p.x < left || p.x > right || p.y < top || p.y > bottom) {
-        projectiles.splice(i, 1);
-        pools.projectiles.push(p);
+        recycleProjectileAt(i);
       }
     }
   }
 
   function updateParticles(dt) {
+    const visibleRect = {
+      left: camera.x - (width / 2) / camera.scale - 260,
+      right: camera.x + (width / 2) / camera.scale + 260,
+      top: camera.y - (height / 2) / camera.scale - 260,
+      bottom: camera.y + (height / 2) / camera.scale + 260,
+    };
     for (let i = particles.length - 1; i >= 0; i--) {
       const p = particles[i];
       p.life -= dt;
       if (p.kind === "toxicZone") {
         const t = 1 - clamp(p.life / p.maxLife, 0, 1);
         p.radius = p.maxRadius * (1 - Math.pow(1 - t, 2));
-        for (const enemy of enemies) {
-          if (enemy.components && enemy.components.collision && enemy.components.collision.attackImmune) continue;
+        enemyGrid.forEachInCircle(p.x, p.y, p.radius, (enemy) => {
+          if (enemy.components && enemy.components.collision && enemy.components.collision.attackImmune) return;
           if ((enemy.x - p.x) ** 2 + (enemy.y - p.y) ** 2 < (enemy.radius + p.radius) ** 2) {
             enemy.hp -= p.damage * dt;
             if (enemy.components && enemy.components.render) enemy.components.render.flash = Math.max(enemy.components.render.flash, 0.05);
             if (Math.random() < dt * 9) spawnParticle(enemy.x, enemy.y, "#caff55", 1, 0.35, 0.35);
           }
-        }
+        });
       } else if (p.kind === "massWave") {
         const t = 1 - clamp(p.life / p.maxLife, 0, 1);
         p.radius = p.maxRadius * t;
         const band = 26 + player.shell * 4;
-        for (const enemy of enemies) {
-          if (p.hitTargets && p.hitTargets.has(enemy)) continue;
+        enemyGrid.forEachInCircle(p.x, p.y, p.radius + band, (enemy) => {
+          if (p.hitTargets && p.hitTargets.has(enemy)) return;
           const d = Math.hypot(enemy.x - p.x, enemy.y - p.y);
           if (Math.abs(d - p.radius) < band + enemy.radius) {
             p.hitTargets.add(enemy);
             damageEnemy(enemy, p.damage, "#ffd3dc", 220, "wave");
           }
-        }
+        });
       }
       p.x += p.vx * dt;
       p.y += p.vy * dt;
       p.vx *= 0.96;
       p.vy *= 0.96;
-      if (p.life <= 0) {
-        particles.splice(i, 1);
-        pools.particles.push(p);
+      const cullOffscreen = p.kind === "splash" || p.kind === "text" || p.kind === "absorb" || p.kind === "electricArc";
+      if (p.life <= 0 || (cullOffscreen && isOutsideRect(p, visibleRect, 80))) {
+        recycleParticleAt(i);
       }
     }
     shake = Math.max(0, shake - dt * 15);
   }
 
   function draw() {
+    perf.drawCalls = 0;
     const sx = shake ? rand(-shake, shake) : 0;
     const sy = shake ? rand(-shake, shake) : 0;
     ctx.save();
@@ -1323,16 +1365,22 @@
   }
 
   function drawDebugPanel() {
+    const effects = countEffects(particles);
     const lines = [
       `FPS: ${Math.round(perf.fps)}`,
       `Enemies: ${enemies.length} / ${MAX_ENEMIES}`,
       `Projectiles: ${projectiles.length}`,
-      `Effects: ${particles.length}`,
+      `Particles: ${particles.length} / ${MAX_PARTICLES}`,
+      `Effects: ${effects}`,
+      `Draw Calls: ${perf.drawCalls}`,
+      `Memory: ${readMemoryUsage()}`,
+      `Active Mutations: ${activeMutationCount(player)}`,
+      `Enemy Cap: ${MAX_ENEMIES} (${runtimeConfig.mobile ? "Mobile" : "PC"})`,
     ];
     if (enemyCapBonus > 0) lines.push(`Cap Scaling: +${Math.round(enemyCapBonus * 100)}%`);
     const x = 14;
     const y = height - 18 - lines.length * 18;
-    const w = 178;
+    const w = 238;
     const h = lines.length * 18 + 14;
 
     ctx.save();
@@ -1438,13 +1486,15 @@
   function drawScreenEffects() {
     if (screenPulse <= 0) return;
     ctx.save();
-    ctx.globalAlpha = screenPulse * 0.45;
+    ctx.globalAlpha = screenPulse * 0.45 * quality.screenEffectScale;
     ctx.fillStyle = playerHurt > 0 ? "#ff0036" : "#8fffd3";
     ctx.fillRect(0, 0, width, height);
-    ctx.globalAlpha = screenPulse * 0.7;
+    perf.drawCalls++;
+    ctx.globalAlpha = screenPulse * 0.7 * quality.screenEffectScale;
     ctx.strokeStyle = playerHurt > 0 ? "#ffedf0" : "#ff315f";
     ctx.lineWidth = 8 + screenPulse * 12;
     ctx.strokeRect(8, 8, width - 16, height - 16);
+    perf.drawCalls++;
     ctx.restore();
   }
 
@@ -1455,11 +1505,13 @@
     g.addColorStop(1, "#020305");
     ctx.fillStyle = g;
     ctx.fillRect(0, 0, width, height);
+    perf.drawCalls++;
     const horror = clamp((runTime - 180) / 180, 0, 1);
     if (horror > 0) {
       ctx.globalAlpha = horror * 0.16;
       ctx.fillStyle = "#ff315f";
       ctx.fillRect(0, 0, width, height);
+      perf.drawCalls++;
       ctx.globalAlpha = 1;
     }
   }
@@ -1480,12 +1532,14 @@
       ctx.moveTo(x, top);
       ctx.lineTo(x + Math.sin(pulse + x) * 18, bottom);
       ctx.stroke();
+      perf.drawCalls++;
     }
     for (let y = oy; y < bottom + grid; y += grid) {
       ctx.beginPath();
       ctx.moveTo(left, y);
       ctx.lineTo(right, y + Math.cos(pulse + y) * 18);
       ctx.stroke();
+      perf.drawCalls++;
     }
     const horror = clamp((runTime - 180) / 180, 0, 1);
     if (horror > 0) {
@@ -1498,6 +1552,7 @@
         ctx.moveTo(left, y);
         for (let x = left; x <= right; x += 90) ctx.lineTo(x, y + Math.sin(pulse * 2 + i + x * 0.02) * 26);
         ctx.stroke();
+        perf.drawCalls++;
       }
     }
     ctx.globalAlpha = 1;
@@ -1513,6 +1568,7 @@
       ctx.beginPath();
       ctx.arc(t.x, t.y, r, 0, TAU);
       ctx.fill();
+      perf.drawCalls++;
     }
     ctx.globalAlpha = 1;
   }
@@ -1524,7 +1580,7 @@
 
     ctx.save();
     ctx.translate(player.x, player.y);
-    ctx.shadowBlur = 28 + mutationCount * 3;
+    ctx.shadowBlur = (28 + mutationCount * 3) * quality.shadowScale;
     ctx.shadowColor = player.electric ? "#8fffd3" : "#ff285e";
 
     const tentacleCount = player.tentacles * 3 + (player.evolution === "electricTentacles" ? 6 : 0);
@@ -1557,6 +1613,7 @@
       ctx.moveTo(Math.cos(a) * r * 0.45, Math.sin(a) * r * 0.45);
       ctx.quadraticCurveTo(Math.cos(a + bend) * len * 0.5, Math.sin(a + bend) * len * 0.5, endX, endY);
       ctx.stroke();
+      perf.drawCalls++;
       if (target) {
         ctx.globalAlpha = 0.85;
         ctx.fillStyle = player.electric && i % 2 ? "#8fffd3" : "#ff416d";
@@ -1639,7 +1696,7 @@
     for (const enemy of enemies) {
       ctx.save();
       ctx.translate(enemy.x, enemy.y);
-      ctx.shadowBlur = enemy.hit ? 22 : 12;
+      ctx.shadowBlur = (enemy.hit ? 22 : 12) * quality.shadowScale;
       ctx.shadowColor = enemy.color;
       ctx.fillStyle = enemy.hit || (enemy.components && enemy.components.render && enemy.components.render.flash > 0) ? "#ffffff" : enemy.color;
       const spikes = enemy.kind === "parasite" ? 3 : enemy.kind === "giant" || enemy.kind === "phage" ? 12 : enemy.kind === "tutorial" ? 5 : 7;
@@ -1655,6 +1712,7 @@
       }
       ctx.closePath();
       ctx.fill();
+      perf.drawCalls++;
       if (enemy.kind === "phage") {
         ctx.globalAlpha = 0.72;
         ctx.strokeStyle = "#d8f0ff";
@@ -1665,6 +1723,7 @@
           ctx.moveTo(Math.cos(a) * enemy.radius * 0.45, Math.sin(a) * enemy.radius * 0.45);
           ctx.lineTo(Math.cos(a) * enemy.radius * 1.45, Math.sin(a) * enemy.radius * 1.45);
           ctx.stroke();
+          perf.drawCalls++;
         }
         ctx.globalAlpha = 1;
       }
@@ -1675,6 +1734,7 @@
         ctx.beginPath();
         ctx.arc(0, 0, enemy.radius * hitScale * 1.35, 0, TAU);
         ctx.stroke();
+        perf.drawCalls++;
         ctx.globalAlpha = 1;
       }
       if (enemy.kind === "toxic" || enemy.kind === "giant") {
@@ -1684,6 +1744,7 @@
         ctx.beginPath();
         ctx.arc(0, 0, enemy.radius * 1.35, 0, TAU);
         ctx.stroke();
+        perf.drawCalls++;
       }
       ctx.restore();
       drawEnemyHpBar(enemy);
@@ -1725,10 +1786,11 @@
           ctx.moveTo(a.x, a.y);
           ctx.lineTo(b.x, b.y);
           ctx.stroke();
+          perf.drawCalls++;
         }
       }
       ctx.globalAlpha = clamp(p.life / p.maxLife, 0, 1);
-      ctx.shadowBlur = 18;
+      ctx.shadowBlur = 18 * quality.shadowScale;
       ctx.shadowColor = p.color;
       ctx.strokeStyle = p.color;
       ctx.lineWidth = p.radius * 0.75;
@@ -1737,10 +1799,12 @@
       ctx.moveTo(p.x, p.y);
       ctx.lineTo(p.x - p.vx * 0.045, p.y - p.vy * 0.045);
       ctx.stroke();
+      perf.drawCalls++;
       ctx.fillStyle = p.color;
       ctx.beginPath();
       ctx.arc(p.x, p.y, p.radius, 0, TAU);
       ctx.fill();
+      perf.drawCalls++;
     }
     ctx.shadowBlur = 0;
     ctx.globalAlpha = 1;
@@ -1757,6 +1821,7 @@
         ctx.font = "900 18px system-ui, sans-serif";
         ctx.textAlign = "center";
         ctx.fillText(p.text, p.x, p.y);
+        perf.drawCalls++;
         ctx.globalCompositeOperation = "lighter";
         continue;
       }
@@ -1764,7 +1829,7 @@
         ctx.globalCompositeOperation = "lighter";
         ctx.strokeStyle = p.color;
         ctx.lineWidth = (2.2 + p.radius * 0.18) / camera.scale;
-        ctx.shadowBlur = 18;
+        ctx.shadowBlur = 18 * quality.shadowScale;
         ctx.shadowColor = p.color;
         ctx.beginPath();
         ctx.moveTo(p.x, p.y);
@@ -1778,6 +1843,7 @@
           ctx.lineTo(nx + Math.cos(a) * jitter, ny + Math.sin(a) * jitter);
         }
         ctx.stroke();
+        perf.drawCalls++;
         ctx.shadowBlur = 0;
         continue;
       }
@@ -1788,12 +1854,14 @@
         ctx.beginPath();
         ctx.arc(p.x, p.y, p.radius, 0, TAU);
         ctx.fill();
+        perf.drawCalls++;
         ctx.globalAlpha = alpha * 0.5;
         ctx.strokeStyle = p.color;
         ctx.lineWidth = 3 / camera.scale;
         ctx.beginPath();
         ctx.arc(p.x, p.y, p.radius, 0, TAU);
         ctx.stroke();
+        perf.drawCalls++;
         continue;
       }
       if (p.kind === "massWave") {
@@ -1801,16 +1869,18 @@
         ctx.strokeStyle = p.color;
         ctx.globalAlpha = alpha * 0.72;
         ctx.lineWidth = (7 + player.shell * 0.7) / camera.scale;
-        ctx.shadowBlur = 24;
+        ctx.shadowBlur = 24 * quality.shadowScale;
         ctx.shadowColor = p.color;
         ctx.beginPath();
         ctx.arc(p.x, p.y, p.radius, 0, TAU);
         ctx.stroke();
+        perf.drawCalls++;
         ctx.globalAlpha = alpha * 0.22;
         ctx.lineWidth = 20 / camera.scale;
         ctx.beginPath();
         ctx.arc(p.x, p.y, p.radius * 0.94, 0, TAU);
         ctx.stroke();
+        perf.drawCalls++;
         ctx.shadowBlur = 0;
         continue;
       }
@@ -1818,6 +1888,7 @@
       ctx.beginPath();
       ctx.arc(p.x, p.y, p.radius * (p.kind === "absorb" ? 1 : alpha), 0, TAU);
       ctx.fill();
+      perf.drawCalls++;
     }
     ctx.globalCompositeOperation = "source-over";
     ctx.globalAlpha = 1;

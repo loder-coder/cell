@@ -3,14 +3,14 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <title>BIOMASS</title>
+    <title>CELL</title>
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
-    <canvas id="game" aria-label="BIOMASS 게임 화면"></canvas>
+    <canvas id="game" aria-label="CELL 게임 화면"></canvas>
 
     <div class="hud">
-      <div class="brand">BIOMASS</div>
+      <div class="brand">CELL</div>
       <div class="meters">
         <div class="meter">
           <span>생체 안정도</span>
@@ -51,7 +51,7 @@
 
     <div class="start" id="startPanel">
       <div>
-        <h1>BIOMASS</h1>
+        <h1>CELL</h1>
         <p>WASD 또는 드래그로 이동. 살아남고, 흡수하고, 처음의 형태를 버리십시오.</p>
         <button id="startButton">배양 시작</button>
       </div>
@@ -66,6 +66,15 @@
       </div>
     </div>
 
+    <script src="src/constants.js"></script>
+    <script src="src/utils.js"></script>
+    <script src="src/platform.js"></script>
+    <script src="src/spatialHash.js"></script>
+    <script src="src/objectPool.js"></script>
+    <script src="src/particle.js"></script>
+    <script src="src/enemyBehaviors.js"></script>
+    <script src="src/debug.js"></script>
+    <script src="src/mutationRegistry.js"></script>
     <script src="game.js"></script>
   </body>
 </html>
