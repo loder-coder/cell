@@ -17,6 +17,7 @@
   const statPanel = document.getElementById("statPanel");
   const startPanel = document.getElementById("startPanel");
   const startButton = document.getElementById("startButton");
+  const difficultyButtons = Array.from(document.querySelectorAll("[data-difficulty]"));
   const pausePanel = document.getElementById("pausePanel");
   const resumeButton = document.getElementById("resumeButton");
   const mutationPanel = document.getElementById("mutationPanel");
@@ -62,6 +63,7 @@
   let lastStatsSignature = "";
   let mutationLockTimer = 0;
   let swarmAngle = 0;
+  let activeDifficulty = "easy";
 
   const keys = new Set();
   const enemies = [];
@@ -102,6 +104,25 @@
     avgEnemyDamage: 0,
     avgTtk: 0,
     wave: 1,
+  };
+  const difficultyDefs = {
+    easy: { hp: 1.32, damage: 1.08, speed: 1.03, spawn: 1.08, cap: 1.04, name: "EASY" },
+    normal: { hp: 1.62, damage: 1.22, speed: 1.08, spawn: 1.22, cap: 1.1, name: "NORMAL" },
+    hard: { hp: 2.05, damage: 1.42, speed: 1.15, spawn: 1.42, cap: 1.2, name: "HARD" },
+  };
+  const mutationIcons = {
+    tentacles: "🦑",
+    acid: "🧪",
+    electric: "⚡",
+    spores: "🫧",
+    eyes: "👁️",
+    shell: "🛡️",
+    splitting: "🧫",
+    absorption: "🩸",
+    slime: "💧",
+    dash: "💨",
+    acceleration: "🦵",
+    evolutionUpgrade: "✴️",
   };
   const session = {
     tutorialMarks: [5, 10, 15],
@@ -151,6 +172,7 @@
     evolutionLevel: 0,
     evolution: "",
     evolutionName: "",
+    evolutions: {},
     mutationPulse: 0,
     cooldowns: {
       bite: 0,
@@ -169,6 +191,8 @@
 
   const MAX_STACK = 5;
   const EVOLUTION_STACK = 4;
+  const PLAYER_DEATH_HP = 0.5;
+  const PLAYER_DAMAGE_SCALE = 0.76;
   const evolutionDefs = [
     { id: "electricTentacles", name: "전기 촉수 군체", needs: ["tentacles", "electric"], hint: "촉수 + 감전" },
     { id: "toxicHive", name: "독성 군락체", needs: ["acid", "spores"], hint: "산성 + 포자" },
@@ -178,7 +202,7 @@
 
   const mutations = [
     { id: "tentacles", name: "촉수 증식", type: "공격 장기", tag: "촉수 +1, 근접 자동공격", desc: "살덩이에서 붙잡는 촉수가 자라 근처 먹이를 후려친다.", path: "감전 기관과 결합하면 전기 촉수 군체", apply: () => player.tentacles = Math.min(MAX_STACK, player.tentacles + 1) },
-    { id: "acid", name: "산성 주머니", type: "공격 장기", tag: "산성탄 +1, 원거리 공격", desc: "부식성 체액을 뱉는 낭이 부풀어 적을 녹인다.", path: "포자낭과 결합하면 독성 군락체", apply: () => player.acid = Math.min(MAX_STACK, player.acid + 1) },
+    { id: "acid", name: "산성 주머니", type: "공격 장기", tag: "산성 산탄 +1", desc: "부식성 체액을 부채꼴로 뿜어 적을 녹인다.", path: "포자낭과 결합하면 독성 군락체", apply: () => player.acid = Math.min(MAX_STACK, player.acid + 1) },
     { id: "electric", name: "감전 기관", type: "공격 장기", tag: "전기 연쇄 +1, 범위 피해", desc: "노출된 신경 다발이 주변 생체를 태우는 전류를 방출한다.", path: "촉수와 결합하면 전기 촉수 군체", apply: () => player.electric = Math.min(MAX_STACK, player.electric + 1) },
     { id: "spores", name: "산성 포자낭", type: "공격 장기", tag: "포자 +1, 사방 발사", desc: "맥동하는 혹에서 기생 포자가 흘러나와 사방으로 번진다.", path: "산성 주머니와 결합하면 독성 군락체", apply: () => player.spores = Math.min(MAX_STACK, player.spores + 1) },
     { id: "eyes", name: "다중 안구", type: "감각 장기", tag: "공격 속도 +14%", desc: "눈이 더 열린다. 먹이를 더 빨리 찾고 더 자주 공격한다.", path: "모든 공격 변이를 선명하게 보조", apply: () => { player.eyes = Math.min(MAX_STACK, player.eyes + 1); player.attackSpeed += 0.14; } },
@@ -216,8 +240,8 @@
     acid: {
       name: "산성 주머니",
       type: "공격 변이",
-      tag: "산성액 +1, 원거리 공격",
-      desc: "부식성 체액을 뱉어 멀리 있는 적을 녹입니다.",
+      tag: "산성 산탄 +1",
+      desc: "부식성 체액을 부채꼴 산탄으로 뿜어 적을 녹입니다.",
       path: "포자낭과 결합하면 산성 포자 군체",
     },
     electric: {
@@ -313,16 +337,20 @@
     return 1 + runTime / 390 + Math.max(0, runTime - 240) / 620 + Math.max(0, runTime - 720) / 1200;
   }
 
+  function difficultyScale(key) {
+    return (difficultyDefs[activeDifficulty] || difficultyDefs.easy)[key] || 1;
+  }
+
   function enemyCapDifficultyScale() {
-    return 1;
+    return difficultyScale("hp");
   }
 
   function enemyCapDamageScale() {
-    return 1;
+    return difficultyScale("damage");
   }
 
   function enemyCapSpeedScale() {
-    return 1;
+    return difficultyScale("speed");
   }
 
   function fortifyExistingEnemies(strength = 1) {
@@ -360,7 +388,7 @@
     perfGuard.gridSkip = pressure > 0.35;
     perfGuard.particleDrawStride = pressure > 0.78 ? 4 : pressure > 0.55 ? 3 : pressure > 0.3 ? 2 : 1;
     perfGuard.bodyStep = pressure > 0.65 ? 3 : pressure > 0.35 ? 2 : 1;
-    perfGuard.enemySoftCap = Math.floor(MAX_ENEMIES * clamp(1 - pressure * 0.28, 0.72, 1));
+    perfGuard.enemySoftCap = Math.floor(MAX_ENEMIES * difficultyScale("cap") * clamp(1 - pressure * 0.28, 0.72, 1));
   }
 
   function enemySizeScale(kind) {
@@ -379,8 +407,8 @@
   }
 
   function bioRange() {
-    const evolved = player.evolution === "electricTentacles";
-    return 130 + Math.max(player.tentacles, player.electric) * 32 + (evolved ? 110 : 0);
+    const evolved = hasEvolution("electricTentacles");
+    return 130 + Math.max(player.tentacles, player.electric) * 32 + (evolved ? 70 : 0);
   }
 
   function tentacleRange() {
@@ -447,6 +475,7 @@
       evolutionLevel: 0,
       evolution: "",
       evolutionName: "",
+      evolutions: {},
       mutationPulse: 0,
       cooldowns: { bite: 0, lash: 0, acid: 0, spark: 0, spore: 0, split: 0, shell: 0, dash: 0, toxin: 0 },
       trail: [],
@@ -491,6 +520,15 @@
     pausePanel.classList.add("hidden");
   }
 
+  function setDifficulty(id) {
+    activeDifficulty = difficultyDefs[id] ? id : "easy";
+    difficultyButtons.forEach((button) => {
+      button.classList.toggle("active", button.dataset.difficulty === activeDifficulty);
+    });
+    lastStatsSignature = "";
+    updateHud();
+  }
+
   function startRun() {
     initAudio();
     reset();
@@ -499,7 +537,7 @@
     gameOverPanel.classList.add("hidden");
     pausePanel.classList.add("hidden");
     mutationPanel.classList.add("hidden");
-    for (let i = 0; i < 7; i++) spawnEnemy("cell");
+    for (let i = 0; i < Math.round(7 * difficultyScale("spawn")); i++) spawnEnemy("cell");
   }
 
   function getEnemy() {
@@ -507,6 +545,7 @@
   }
 
   function freeEnemy(enemy) {
+    enemy.alive = false;
     release(pools.enemies, enemy);
   }
 
@@ -537,23 +576,24 @@
     release(pools.projectiles, p);
   }
 
-  function spawnEnemy(kind) {
+  function spawnEnemy(kind, options = {}) {
     const type = enemyTypes[kind];
     if (!type) return;
     if (enemies.length >= perfGuard.enemySoftCap) {
       fortifyExistingEnemies(kind === "giant" ? 0.8 : kind === "phage" ? 1.4 : 0.25);
       return false;
     }
-    const angle = rand(0, TAU);
-    const distance = Math.max(camera.worldWidth || width, camera.worldHeight || height) * 0.58 + rand(30, 120);
+    const angle = Object.prototype.hasOwnProperty.call(options, "angle") ? options.angle : rand(0, TAU);
+    const distance = Object.prototype.hasOwnProperty.call(options, "distance") ? options.distance : Math.max(camera.worldWidth || width, camera.worldHeight || height) * 0.58 + rand(30, 120);
     const progressScale = enemyProgressScale();
     const sizeScale = enemySizeScale(kind);
     const hpScale = (kind === "tutorial" ? 1 : kind === "phage" ? 1 + runTime / 300 : progressScale) * enemyCapDifficultyScale();
     const damageScale = (kind === "tutorial" ? 0 : kind === "phage" ? 1 + runTime / 720 : 1 + runTime / 680) * enemyCapDamageScale();
     const enemy = getEnemy();
+    enemy.alive = true;
     enemy.kind = kind;
-    enemy.x = player.x + Math.cos(angle) * distance;
-    enemy.y = player.y + Math.sin(angle) * distance;
+    enemy.x = Object.prototype.hasOwnProperty.call(options, "x") ? options.x : player.x + Math.cos(angle) * distance;
+    enemy.y = Object.prototype.hasOwnProperty.call(options, "y") ? options.y : player.y + Math.sin(angle) * distance;
     if (kind === "phage") {
       enemy.x = player.x + Math.cos(angle) * Math.min(distance, Math.max(width, height) * 0.34);
       enemy.y = player.y + Math.sin(angle) * Math.min(distance, Math.max(width, height) * 0.34);
@@ -564,9 +604,18 @@
       stats: { baseHp: type.hp, baseDamage: type.damage, baseSpeed: type.speed, progressScale, sizeScale },
       render: { flash: 0, hpBar: true },
       collision: { attackImmune: kind === "tutorial", contactBreak: kind === "tutorial" },
-      movement: { lockTimer: 0, targetX: player.x, targetY: player.y },
+      movement: { lockTimer: 0, targetX: player.x, targetY: player.y, fixedDirX: 0, fixedDirY: 0 },
       boss: kind === "phage" ? { attackTimer: 2.4, waveTimer: 7.2 } : null,
     };
+    if ((type.behavior || ENEMY_BEHAVIORS.CHASER) === ENEMY_BEHAVIORS.DASHER) {
+      const dx = player.x - enemy.x;
+      const dy = player.y - enemy.y;
+      const d = Math.hypot(dx, dy) || 1;
+      enemy.components.movement.fixedDirX = dx / d;
+      enemy.components.movement.fixedDirY = dy / d;
+      enemy.components.movement.targetX = enemy.x + enemy.components.movement.fixedDirX * 1200;
+      enemy.components.movement.targetY = enemy.y + enemy.components.movement.fixedDirY * 1200;
+    }
     enemy.hp = type.hp * hpScale * (kind === "phage" ? 1 : 1.18);
     enemy.maxHp = enemy.hp;
     enemy.speed = type.speed * (1.08 + runTime / 620) * enemyCapSpeedScale();
@@ -580,6 +629,7 @@
     enemy.hit = 0;
     enemy.pulse = 0;
     enemy.splitDone = false;
+    enemy.shellContactCooldown = 0;
     enemy.fortified = 0;
     enemies.push(enemy);
     return true;
@@ -656,7 +706,7 @@
     p.maxLife = 2.35;
     p.radius = 18;
     p.maxRadius = 118 + power * 14;
-    p.damage = 18 + power * 5;
+    p.damage = (18 + power * 5) * PLAYER_DAMAGE_SCALE;
     p.color = "#caff55";
     p.kind = "toxicZone";
     p.hitTargets = null;
@@ -673,8 +723,8 @@
     p.life = 0.92;
     p.maxLife = 0.92;
     p.radius = player.radius * 1.4;
-    p.maxRadius = Math.max(camera.worldWidth || width, camera.worldHeight || height) * 0.72;
-    p.damage = 28 + power * 9;
+    p.maxRadius = Math.max(camera.worldWidth || width, camera.worldHeight || height) * 0.48;
+    p.damage = 20 + power * 5.5;
     p.color = "#ffd3dc";
     p.kind = "massWave";
     if (!p.hitTargets) p.hitTargets = new Set();
@@ -792,6 +842,15 @@
     return true;
   }
 
+  function fireShotgun(kind, x, y, angle, count, spread, power) {
+    let fired = 0;
+    for (let i = 0; i < count; i++) {
+      const offset = count === 1 ? 0 : (i / (count - 1) - 0.5) * spread;
+      if (fireProjectileAngle(kind, x, y, angle + offset, power)) fired++;
+    }
+    return fired;
+  }
+
   function nearestEnemy(range = 9999) {
     let best = null;
     let bestD = range * range;
@@ -862,7 +921,7 @@
 
   function healPlayerFromKill(amount) {
     updateBalanceMetrics();
-    const hpsCap = 8 + player.absorption * 4.2 + (player.evolution === "swarmOrganism" ? 8 : 0);
+    const hpsCap = 8 + player.absorption * 4.2 + (hasEvolution("swarmOrganism") ? 8 : 0);
     const remainingBudget = Math.max(0, hpsCap * balance.window - balance.healTotal);
     return healPlayer(Math.min(amount, remainingBudget));
   }
@@ -871,21 +930,21 @@
     const haste = player.attackSpeed;
     let dps = (10 + player.level * 0.9) / (0.42 / haste);
     if (player.tentacles) {
-      const evolved = player.evolution === "electricTentacles";
-      const hits = Math.min(player.tentacles + (evolved ? 4 : 0), evolved ? 10 : 5);
-      dps += hits * (17 + player.tentacles * 5 + (evolved ? 18 : 0)) / ((evolved ? 0.62 : 0.86) / haste);
-      if (evolved) dps += hits * (9 + player.electric * 4) * 1.8 / (0.62 / haste);
+      const evolved = hasEvolution("electricTentacles");
+      const hits = Math.min(player.tentacles + (evolved ? 2 : 0), evolved ? 7 : 5);
+      dps += hits * (17 + player.tentacles * 5 + (evolved ? 10 : 0)) / ((evolved ? 0.72 : 0.86) / haste);
+      if (evolved) dps += hits * (6 + player.electric * 2.5 + player.evolutionLevel * 2) * 1.2 / (0.72 / haste);
     }
-    if (player.acid) dps += (15 + player.acid * 8) / ((player.evolution === "toxicHive" ? 0.82 : 1.05) / haste) * (player.evolution === "toxicHive" ? 3 : 1);
-    if (player.spores && player.evolution !== "toxicHive") dps += (player.spores + 1) * (8 + player.spores * 4) / (1.65 / haste);
-    if (player.electric && player.evolution !== "electricTentacles") dps += (1 + player.electric) * (14 + player.electric * 7) / (1.25 / haste);
+    if (player.acid) dps += (15 + player.acid * 8) / ((hasEvolution("toxicHive") ? 0.82 : 1.05) / haste) * (hasEvolution("toxicHive") ? 3 : 1);
+    if (player.spores && !hasEvolution("toxicHive")) dps += (player.spores + 1) * (8 + player.spores * 4) / (1.65 / haste);
+    if (player.electric && !hasEvolution("electricTentacles")) dps += (1 + player.electric) * (14 + player.electric * 7) / (1.25 / haste);
     if (player.splitting) {
-      if (player.evolution === "swarmOrganism") dps += (18 + player.splitting * 5) * (9 + (player.splitting + player.absorption) * 3.2) * 0.48 / (0.52 / haste);
+      if (hasEvolution("swarmOrganism")) dps += (3 + player.splitting + player.evolutionLevel) * (9 + (player.splitting + player.absorption) * 3.2) * 0.38 / (0.28 / haste);
       else dps += (12 + player.splitting * 6) / (0.68 / haste);
     }
-    if (player.evolution === "immortalMass") dps += (28 + (player.shell + player.regen) * 9) * 5 / (1.55 / haste);
-    if (player.evolution === "toxicHive") dps += (4 + Math.min(6, player.acid + player.spores)) * (18 + (player.acid + player.spores) * 5) * 0.9;
-    return dps;
+    if (hasEvolution("immortalMass")) dps += (20 + (player.shell + player.regen) * 5.5) * 3.2 / (2.2 / haste);
+    if (hasEvolution("toxicHive")) dps += (2 + Math.min(4, player.acid + player.spores) * 0.7) * (18 + (player.acid + player.spores) * 5) * 0.55;
+    return dps * PLAYER_DAMAGE_SCALE;
   }
 
   function estimateAverageEnemyStats() {
@@ -934,9 +993,10 @@
       spawnText(enemy.x, enemy.y - enemy.radius, "IMMUNE", "#d4fff0");
       return false;
     }
+    const finalDamage = source === "contact" ? damage : damage * PLAYER_DAMAGE_SCALE;
     const beforeHp = enemy.hp;
-    enemy.hp -= damage;
-    if (source !== "contact") recordDamage(Math.max(0, Math.min(beforeHp, damage)));
+    enemy.hp -= finalDamage;
+    if (source !== "contact") recordDamage(Math.max(0, Math.min(beforeHp, finalDamage)));
     enemy.hit = 0.22;
     if (enemy.components && enemy.components.render) enemy.components.render.flash = 0.2;
     enemy.pulse = 1;
@@ -947,11 +1007,11 @@
     }
     spawnParticle(enemy.x, enemy.y, color, 10, 0.75, 0.55);
     spawnParticle(enemy.x, enemy.y, "#5d0016", 7, 0.55, 0.75);
-    if (damage >= 18) {
+    if (finalDamage >= 18) {
       hitStop = Math.max(hitStop, 0.035);
       shake = Math.max(shake, 2.2);
     }
-    spawnText(enemy.x, enemy.y - enemy.radius, Math.round(damage).toString(), color);
+    spawnText(enemy.x, enemy.y - enemy.radius, Math.round(finalDamage).toString(), color);
     if (Math.random() < 0.45) playSound("hit");
     if (enemy.hp <= 0) killEnemy(enemy);
     return true;
@@ -959,24 +1019,29 @@
 
   function applyEvolutionBonus(id) {
     if (id === "electricTentacles") {
-      player.attackSpeed += 0.32;
-      player.speed += 18;
+      player.attackSpeed += 0.16;
+      player.speed += 12;
     } else if (id === "toxicHive") {
       player.slime = Math.max(player.slime, 1);
-      player.regen += 1.5;
+      player.regen += 0.9;
     } else if (id === "immortalMass") {
-      player.armor += 0.16;
-      player.maxHp += 50;
-      player.hp += 50;
+      player.armor += 0.1;
+      player.maxHp += 32;
+      player.hp += 32;
     } else if (id === "swarmOrganism") {
       player.absorption = Math.max(player.absorption, 2);
-      player.attackSpeed += 0.18;
+      player.attackSpeed += 0.08;
     }
+  }
+
+  function hasEvolution(id) {
+    return Boolean(player.evolutions && player.evolutions[id]);
   }
 
   function damagePlayer(amount, enemy) {
     const damage = amount * 0.72 * (1 - player.armor);
     player.hp -= damage;
+    if (player.hp <= PLAYER_DEATH_HP) player.hp = 0;
     playerHurt = 1;
     screenPulse = Math.max(screenPulse, 0.36);
     hitStop = Math.max(hitStop, enemy.kind === "giant" ? 0.09 : 0.045);
@@ -988,6 +1053,54 @@
     spawnParticle(player.x, player.y, "#a30034", 18, 1.15, 0.8);
     spawnText(player.x, player.y - player.radius - 10, "피격", "#ffedf0");
     playSound("hurt");
+    if (player.hp <= 0 && state === "play") endRun();
+  }
+
+  function applyShellContactDamage(enemy, dt) {
+    if (!enemy.alive || !player.shell || enemy.kind === "phage") return;
+    enemy.shellContactCooldown = Math.max(0, (enemy.shellContactCooldown || 0) - dt);
+    const shellRange = player.radius + enemy.radius + 18 + player.shell * 5;
+    if ((player.x - enemy.x) ** 2 + (player.y - enemy.y) ** 2 > shellRange * shellRange) return;
+    if (enemy.shellContactCooldown > 0) return;
+    const damage = 7 + player.shell * 4.5 + (hasEvolution("immortalMass") ? 9 : 0);
+    if (damageEnemy(enemy, damage, "#ffd3dc", 72, "shell")) {
+      if (!enemy.alive) return;
+      enemy.shellContactCooldown = Math.max(0.22, 0.48 - player.shell * 0.035);
+      spawnParticle(enemy.x, enemy.y, "#ffd3dc", 10 + player.shell * 2, 0.85, 0.42);
+    }
+  }
+
+  function separateEnemy(enemy, dt) {
+    if (enemy.kind === "phage") return;
+    let pushX = 0;
+    let pushY = 0;
+    let hits = 0;
+    enemyGrid.forEachInCircle(enemy.x, enemy.y, enemy.radius * 2.6 + 18, (other) => {
+      if (!other.alive || other === enemy || other.kind === "phage") return;
+      const dx = enemy.x - other.x;
+      const dy = enemy.y - other.y;
+      let d2 = dx * dx + dy * dy;
+      const minDist = enemy.radius + other.radius + 5;
+      if (d2 >= minDist * minDist) return;
+      if (d2 < 0.0001) {
+        const a = (enemy.pulse + hits + 1) * 2.39996;
+        pushX += Math.cos(a);
+        pushY += Math.sin(a);
+        hits++;
+        return;
+      }
+      const d = Math.sqrt(d2);
+      const overlap = (minDist - d) / minDist;
+      pushX += (dx / d) * overlap;
+      pushY += (dy / d) * overlap;
+      hits++;
+    });
+    if (!hits) return;
+    const strength = clamp(dt * 220, 0, 10);
+    enemy.x += pushX * strength;
+    enemy.y += pushY * strength;
+    enemy.vx += pushX * 16;
+    enemy.vy += pushY * 16;
   }
 
   function killEnemy(enemy) {
@@ -1000,7 +1113,7 @@
     }
     player.kills++;
     player.xp += enemy.xp * xpMultiplier();
-    const swarmHeal = player.evolution === "swarmOrganism" ? 6 : 0;
+    const swarmHeal = hasEvolution("swarmOrganism") ? 6 : 0;
     healPlayerFromKill(player.absorption * 1.9 + swarmHeal);
     shake = Math.max(shake, enemy.radius * 0.07);
     spawnParticle(enemy.x, enemy.y, enemy.color, enemy.kind === "giant" ? 42 : 13, enemy.kind === "giant" ? 1.7 : 1, 1.1);
@@ -1046,7 +1159,7 @@
       const current = stackOf(mutation.id);
       const pipMax = mutation.id === "evolutionUpgrade" ? 3 : MAX_STACK;
       button.className = "choice";
-      button.innerHTML = `<strong>${mutation.name}</strong><span>${mutation.type}</span><b class="tag">${mutation.tag}</b><div class="stack">${stackPips(current)}</div><span>${mutation.desc}</span><em class="path">진화 암시: ${mutation.path}</em>`;
+      button.innerHTML = `<strong>${mutation.name}</strong><span>${mutation.type}</span><b class="tag">${mutation.tag}</b><div class="stack">${stackPips(current, pipMax)}</div><span>${mutation.desc}</span><em class="path">진화 암시: ${mutation.path}</em>`;
       button.querySelector(".path").textContent = `진화 암시: ${mutation.path}`;
       button.addEventListener("click", () => chooseMutation(mutation));
       choiceGrid.appendChild(button);
@@ -1128,7 +1241,7 @@
     let weight = 1 + stack * 1.65;
     if (stack >= 3) weight += 1.75;
     const relatedEvolution = evolutionDefs.find((evo) => evo.needs.includes(mutation.id));
-    if (relatedEvolution && !player.evolution) {
+    if (relatedEvolution && !hasEvolution(relatedEvolution.id)) {
       const hasPartner = relatedEvolution.needs.some((id) => id !== mutation.id && stackOf(id) > 0);
       if (hasPartner) weight += 2.2;
     }
@@ -1141,10 +1254,9 @@
     return player[id] || 0;
   }
 
-  function stackPips(current) {
+  function stackPips(current, max = MAX_STACK) {
     let html = "";
-    const max = MAX_STACK;
-    for (let i = 0; i < max; i++) html += `<i class="${i < current ? "on" : ""}"></i>`;
+    for (let i = 0; i < max; i++) html += `<i class="${i < current ? "on" : ""}">${i < current ? "🧬" : "○"}</i>`;
     return html;
   }
 
@@ -1179,7 +1291,8 @@
     for (const evo of evolutionDefs) {
       const ready = evo.needs.every((id) => stackOf(id) >= EVOLUTION_STACK);
       console.debug(`[CELL] 진화 검증: ${evo.name} ${ready ? "가능" : "미충족"}`);
-      if (ready && !player.evolution) {
+      if (ready && !hasEvolution(evo.id)) {
+        player.evolutions[evo.id] = true;
         player.evolution = evo.id;
         player.evolutionName = evo.name;
         break;
@@ -1244,13 +1357,13 @@
 
     const pressure = 1.25 + runTime / 120;
     if (!finalPhase && spawnTimer <= 0) {
-      const count = Math.min(7, 2 + Math.floor(runTime / 70));
+      const count = Math.min(9, Math.ceil((2 + Math.floor(runTime / 70)) * difficultyScale("spawn")));
       for (let i = 0; i < count; i++) {
         const roll = Math.random();
         const kind = runTime > 330 && roll < 0.06 ? "giant" : runTime > 185 && roll < 0.18 ? "splitter" : runTime > 115 && roll < 0.34 ? "toxic" : roll < 0.54 ? "parasite" : "cell";
         spawnEnemy(kind);
       }
-      spawnTimer = Math.max(0.24, 1.35 / pressure);
+      spawnTimer = Math.max(0.24, 1.35 / (pressure * difficultyScale("spawn")));
     }
     if (!finalPhase && bossTimer <= 0) {
       spawnEnemy("giant");
@@ -1266,7 +1379,10 @@
     updateParticles(dt);
     updateBalanceMetrics();
     updateHud();
-    if (player.hp <= 0) endRun();
+    if (player.hp <= PLAYER_DEATH_HP && state === "play") {
+      player.hp = 0;
+      endRun();
+    }
   }
 
   function updateSession() {
@@ -1297,7 +1413,7 @@
   }
 
   function spawnWave(waveIndex) {
-    const spawnBudget = Math.min(perfGuard.enemySoftCap - enemies.length, 14 + waveIndex * 4);
+    const spawnBudget = Math.min(perfGuard.enemySoftCap - enemies.length, Math.round((14 + waveIndex * 4) * difficultyScale("spawn")));
     if (spawnBudget <= 0) {
       fortifyExistingEnemies(1.2);
       return;
@@ -1306,21 +1422,44 @@
     const splitterCount = runTime > 185 ? Math.min(5, Math.floor(spawnBudget * 0.22)) : 0;
     const toxicCount = runTime > 115 ? Math.min(6, Math.floor(spawnBudget * 0.24)) : 0;
     const parasiteCount = Math.max(0, Math.floor(spawnBudget * 0.28));
+    const waveKinds = [];
+
+    for (let i = 0; i < heavyCount && waveKinds.length < spawnBudget; i++) waveKinds.push(waveIndex >= 2 && i === 0 ? "giant" : "cell");
+    for (let i = 0; i < splitterCount && waveKinds.length < spawnBudget; i++) waveKinds.push("splitter");
+    for (let i = 0; i < toxicCount && waveKinds.length < spawnBudget; i++) waveKinds.push("toxic");
+    for (let i = 0; i < parasiteCount && waveKinds.length < spawnBudget; i++) waveKinds.push("parasite");
+    while (waveKinds.length < spawnBudget) {
+      waveKinds.push(waveKinds.length % 3 === 0 ? "parasite" : "cell");
+    }
+
+    const pattern = waveIndex % 3;
+    const baseDistance = Math.max(360, Math.min(Math.max(camera.worldWidth || width, camera.worldHeight || height) * 0.42, 720));
+    const startAngle = rand(0, TAU);
     let spawned = 0;
 
-    for (let i = 0; i < heavyCount && spawned < spawnBudget; i++, spawned++) spawnEnemy(waveIndex >= 2 && i === 0 ? "giant" : "cell");
-    for (let i = 0; i < splitterCount && spawned < spawnBudget; i++, spawned++) spawnEnemy("splitter");
-    for (let i = 0; i < toxicCount && spawned < spawnBudget; i++, spawned++) spawnEnemy("toxic");
-    for (let i = 0; i < parasiteCount && spawned < spawnBudget; i++, spawned++) spawnEnemy("parasite");
-    while (spawned < spawnBudget) {
-      spawnEnemy(spawned % 3 === 0 ? "parasite" : "cell");
-      spawned++;
+    for (let i = 0; i < waveKinds.length; i++) {
+      let angle = startAngle + rand(-0.35, 0.35);
+      let distance = baseDistance + rand(-45, 85);
+
+      if (pattern === 1) {
+        angle = startAngle + (i / waveKinds.length) * TAU + rand(-0.08, 0.08);
+        distance = baseDistance + Math.sin(i * 1.7) * 32;
+      } else if (pattern === 2) {
+        const side = i % 2 === 0 ? 0 : Math.PI;
+        const lane = Math.floor(i / 2);
+        angle = startAngle + side + rand(-0.28, 0.28);
+        distance = baseDistance + (lane % 4) * 34;
+      }
+
+      if (spawnEnemy(waveKinds[i], { angle, distance })) spawned++;
     }
 
     spawnTimer = Math.min(spawnTimer, 0.42);
-    screenPulse = Math.max(screenPulse, 0.34);
-    shake = Math.max(shake, 8);
-    spawnText(player.x, player.y - player.radius - 34, `WAVE ${waveIndex}`, "#d4fff0");
+    screenPulse = Math.max(screenPulse, pattern === 1 ? 0.48 : 0.34);
+    shake = Math.max(shake, pattern === 1 ? 12 : 8);
+    const waveLabel = pattern === 1 ? "RING" : pattern === 2 ? "PINCH" : "SURGE";
+    spawnText(player.x, player.y - player.radius - 34, `WAVE ${waveIndex} ${waveLabel}`, "#d4fff0");
+    if (spawned < spawnBudget) fortifyExistingEnemies((spawnBudget - spawned) * 0.12);
   }
 
   function updatePlayer(dt) {
@@ -1363,27 +1502,27 @@
       player.cooldowns.bite = 0.42 / haste;
     }
     if (player.tentacles && player.cooldowns.lash <= 0) {
-      const evolved = player.evolution === "electricTentacles";
+      const evolved = hasEvolution("electricTentacles");
       const range = tentacleRange();
-      const lashes = Math.min(player.tentacles + (evolved ? 4 : 0), evolved ? 10 : 5);
+      const lashes = Math.min(player.tentacles + (evolved ? 2 : 0), evolved ? 7 : 5);
       const targets = sortedEnemiesInRange(range, lashes);
       for (const target of targets) {
         if (target) {
-          damageEnemy(target, 17 + player.tentacles * 5 + (evolved ? 18 : 0), evolved ? "#8fffd3" : "#ff416d", evolved ? 170 : 110);
+          damageEnemy(target, 17 + player.tentacles * 5 + (evolved ? 10 : 0), evolved ? "#8fffd3" : "#ff416d", evolved ? 135 : 110);
           spawnParticle(target.x, target.y, evolved ? "#8fffd3" : "#ff315f", evolved ? 24 : 16, evolved ? 1.25 : 1, 0.45);
           if (evolved) {
             const angle = Math.atan2(target.y - player.y, target.x - player.x);
             const tipX = player.x + Math.cos(angle) * Math.min(range, Math.hypot(target.x - player.x, target.y - player.y) * 0.72);
             const tipY = player.y + Math.sin(angle) * Math.min(range, Math.hypot(target.x - player.x, target.y - player.y) * 0.72);
             spawnElectricArc(tipX, tipY, target.x, target.y);
-            const chainRadius = 175 + player.evolutionLevel * 28;
+            const chainRadius = 130 + player.evolutionLevel * 18;
             let chainCount = 0;
-            const maxChains = 3 + player.evolutionLevel * 2;
+            const maxChains = 2 + player.evolutionLevel;
             enemyGrid.forEachInCircle(target.x, target.y, chainRadius, (near) => {
               if (chainCount >= maxChains) return;
               if (near !== target && (near.x - target.x) ** 2 + (near.y - target.y) ** 2 < chainRadius ** 2) {
                 chainCount++;
-                damageEnemy(near, 9 + player.electric * 4 + player.evolutionLevel * 3, "#8fffd3", 70);
+                damageEnemy(near, 6 + player.electric * 2.5 + player.evolutionLevel * 2, "#8fffd3", 55);
                 spawnElectricArc(target.x, target.y, near.x, near.y, "#d4fff0");
               }
             });
@@ -1391,28 +1530,28 @@
         }
       }
       if (targets.length) playSound("attack");
-      player.cooldowns.lash = (evolved ? 0.62 : 0.86) / haste;
+      player.cooldowns.lash = (evolved ? 0.72 : 0.86) / haste;
     }
     if (player.acid && player.cooldowns.acid <= 0) {
       const target = nearestEnemy(760);
-      if (player.evolution === "toxicHive" && target) {
+      if (target) {
         const base = Math.atan2(target.y - player.y, target.x - player.x);
-        for (let i = -1; i <= 1; i++) fireProjectileAngle("acid", player.x, player.y, base + i * 0.28, player.acid + 2);
-      } else {
-        fireProjectile("acid", player.x, player.y, target, player.acid);
+        const pellets = player.acid + (hasEvolution("toxicHive") ? 3 : 1);
+        fireShotgun("acid", player.x, player.y, base, pellets, hasEvolution("toxicHive") ? 0.92 : 0.58, Math.max(1, player.acid * (hasEvolution("toxicHive") ? 0.45 : 0.38)));
+        playSound("attack");
       }
-      playSound("attack");
-      player.cooldowns.acid = (player.evolution === "toxicHive" ? 0.82 : 1.05) / haste;
+      player.cooldowns.acid = (hasEvolution("toxicHive") ? 0.95 : 1.05) / haste;
     }
-    if (player.spores && player.cooldowns.spore <= 0 && player.evolution !== "toxicHive") {
-      const spread = player.spores + 1;
-      for (let i = 0; i < spread; i++) {
-        fireProjectile("spore", player.x, player.y, nearestEnemy(640), player.spores);
+    if (player.spores && player.cooldowns.spore <= 0 && !hasEvolution("toxicHive")) {
+      const count = player.spores + 2;
+      const base = rand(0, TAU);
+      for (let i = 0; i < count; i++) {
+        fireProjectileAngle("spore", player.x, player.y, base + (i / count) * TAU, Math.max(1, player.spores * 0.45));
       }
       playSound("attack");
       player.cooldowns.spore = 1.65 / haste;
     }
-    if (player.electric && player.cooldowns.spark <= 0 && player.evolution !== "electricTentacles") {
+    if (player.electric && player.cooldowns.spark <= 0 && !hasEvolution("electricTentacles")) {
       const arcs = 1 + player.electric;
       const range = electricRange();
       const targets = sortedEnemiesInRange(range, arcs);
@@ -1421,9 +1560,9 @@
       player.cooldowns.spark = 1.25 / haste;
     }
     if (player.splitting && player.cooldowns.split <= 0) {
-      const evolved = player.evolution === "swarmOrganism";
+      const evolved = hasEvolution("swarmOrganism");
       if (evolved) {
-        const count = Math.max(4, Math.floor((5 + player.splitting + player.evolutionLevel * 2) * clamp(perfGuard.effectScale + 0.18, 0.45, 1)));
+        const count = Math.max(3, Math.floor((3 + player.splitting + player.evolutionLevel) * clamp(perfGuard.effectScale + 0.18, 0.45, 1)));
         swarmAngle = (swarmAngle + 0.42 + player.evolutionLevel * 0.08) % TAU;
         const base = swarmAngle;
         const fan = 0.22 + player.evolutionLevel * 0.035;
@@ -1433,7 +1572,7 @@
         }
         spawnParticle(player.x, player.y, "#ff89a1", 26, 1.15, 0.42);
         playSound("attack");
-        player.cooldowns.split = 0.13 / haste;
+        player.cooldowns.split = 0.28 / haste;
         return;
       }
       const targets = sortedEnemiesInRange(220, 1);
@@ -1446,25 +1585,22 @@
       player.cooldowns.split = 0.68 / haste;
     }
 
-    if (player.evolution === "immortalMass" && player.cooldowns.shell <= 0) {
+    if (hasEvolution("immortalMass") && player.cooldowns.shell <= 0) {
       spawnMassWave(player.shell + player.regen);
       spawnParticle(player.x, player.y, "#ffd3dc", 42, 1.25, 0.55);
       playSound("attack");
-      player.cooldowns.shell = 1.55 / haste;
+      player.cooldowns.shell = 2.2 / haste;
     }
 
-    if (player.evolution === "toxicHive") {
+    if (hasEvolution("toxicHive")) {
       if (player.cooldowns.toxin <= 0) {
-        const zones = Math.max(2, Math.floor((4 + Math.min(6, player.acid + player.spores)) * clamp(perfGuard.effectScale + 0.12, 0.45, 1)));
-        const left = camera.x - (width / 2) / camera.scale;
-        const right = camera.x + (width / 2) / camera.scale;
-        const top = camera.y - (height / 2) / camera.scale;
-        const bottom = camera.y + (height / 2) / camera.scale;
-        for (let i = 0; i < zones; i++) {
-          spawnToxicZone(rand(left, right), rand(top, bottom), player.acid + player.spores);
+        const targets = sortedEnemiesInRange(720, 2 + player.evolutionLevel);
+        for (const target of targets) {
+          const base = Math.atan2(target.y - player.y, target.x - player.x);
+          fireShotgun("spore", player.x, player.y, base, 3 + player.evolutionLevel, 0.72, Math.max(1, (player.acid + player.spores) * 0.36));
         }
-        playSound("attack");
-        player.cooldowns.toxin = 1.9 / haste;
+        if (targets.length) playSound("attack");
+        player.cooldowns.toxin = 2.65 / haste;
       }
     }
   }
@@ -1500,7 +1636,7 @@
           if (t.life > 0 && (enemy.x - t.x) ** 2 + (enemy.y - t.y) ** 2 < (t.r + enemy.radius) ** 2) {
             slow = 0.45;
             if (!(enemy.components && enemy.components.collision && enemy.components.collision.attackImmune)) {
-              enemy.hp -= player.slime * dt * 5;
+              enemy.hp -= player.slime * dt * 5 * PLAYER_DAMAGE_SCALE;
               if (enemy.components && enemy.components.render) enemy.components.render.flash = Math.max(enemy.components.render.flash, 0.04);
             }
             break;
@@ -1511,6 +1647,9 @@
       enemy.vy += (Math.sin(a) * enemy.speed * slow - enemy.vy) * clamp(dt * 4, 0, 1);
       enemy.x += enemy.vx * dt;
       enemy.y += enemy.vy * dt;
+      separateEnemy(enemy, dt);
+      applyShellContactDamage(enemy, dt);
+      if (!enemy.alive || enemy.hp <= 0) continue;
       enemy.hit = Math.max(0, enemy.hit - dt);
       if (enemy.components && enemy.components.render) enemy.components.render.flash = Math.max(0, enemy.components.render.flash - dt);
       enemy.pulse = Math.max(0, (enemy.pulse || 0) - dt * 4);
@@ -1600,7 +1739,7 @@
               if (near !== enemy && (p.x - near.x) ** 2 + (p.y - near.y) ** 2 < 92 ** 2) damageEnemy(near, p.damage * 0.42, "#caff55", 20, "poison");
             });
           }
-          if (p.kind === "spore" && player.evolution === "toxicHive") {
+          if (p.kind === "spore" && hasEvolution("toxicHive")) {
             spawnParticle(p.x, p.y, "#caff55", 20, 0.95, 0.9);
             if (applied) enemyGrid.forEachInCircle(p.x, p.y, 118, (near) => {
               if (near !== enemy && (p.x - near.x) ** 2 + (p.y - near.y) ** 2 < 118 ** 2) damageEnemy(near, p.damage * 0.55, "#caff55", 28, "poison");
@@ -1762,7 +1901,7 @@
   function drawElectricRange() {
     if (!player.electric) return;
     if (perfGuard.effectScale < 0.28) return;
-    const evolved = player.evolution === "electricTentacles";
+    const evolved = hasEvolution("electricTentacles");
     if (evolved) return;
     const range = electricRange();
     const charge = clamp(1 - player.cooldowns.spark / ((evolved ? 0.74 : 1.25) / player.attackSpeed), 0, 1);
@@ -1812,7 +1951,7 @@
     ctx.beginPath();
     ctx.arc(player.x, player.y, r * 1.08, pulse * 0.9, pulse * 0.9 + TAU * 0.72);
     ctx.stroke();
-    if (player.evolution === "swarmOrganism") {
+    if (hasEvolution("swarmOrganism")) {
       ctx.globalAlpha = 0.65;
       for (let i = 0; i < 6; i++) {
         const a = pulse * 2.2 + (i / 6) * TAU;
@@ -1924,8 +2063,8 @@
     ctx.shadowBlur = (28 + mutationCount * 3) * quality.shadowScale * perfGuard.shadowScale;
     ctx.shadowColor = player.electric ? "#8fffd3" : "#ff285e";
 
-    const tentacleCount = player.tentacles * 3 + (player.evolution === "electricTentacles" ? 6 : 0);
-    const activeTentacles = Math.min(tentacleCount, Math.max(1, player.tentacles + (player.evolution === "electricTentacles" ? 2 : 0)));
+    const tentacleCount = player.tentacles * 3 + (hasEvolution("electricTentacles") ? 6 : 0);
+    const activeTentacles = Math.min(tentacleCount, Math.max(1, player.tentacles + (hasEvolution("electricTentacles") ? 2 : 0)));
     const reachRange = tentacleRange();
     const tentacleTargets = player.tentacles ? sortedEnemiesInRange(reachRange, activeTentacles) : [];
     for (let i = 0; i < tentacleCount; i++) {
@@ -1977,7 +2116,7 @@
       ctx.fill();
     }
 
-    if (player.shell || player.evolution === "immortalMass") {
+    if (player.shell || hasEvolution("immortalMass")) {
       const plates = 8 + player.shell * 5;
       ctx.strokeStyle = "#ffd3dc";
       ctx.lineWidth = 2 + player.shell * 0.8;
@@ -1991,9 +2130,9 @@
       ctx.globalAlpha = 1;
     }
 
-    if (player.acid || player.spores || player.evolution === "toxicHive") {
+    if (player.acid || player.spores || hasEvolution("toxicHive")) {
       ctx.fillStyle = "#caff55";
-      const sacs = player.acid * 3 + player.spores * 4 + (player.evolution === "toxicHive" ? 8 : 0);
+      const sacs = player.acid * 3 + player.spores * 4 + (hasEvolution("toxicHive") ? 8 : 0);
       for (let i = 0; i < sacs; i++) {
         const a = (i / Math.max(1, sacs)) * TAU + pulse;
         const rr = r * (0.62 + (i % 3) * 0.13);
@@ -2017,7 +2156,7 @@
     }
 
     if (player.splitting) {
-      const cells = 2 + player.splitting * 2 + (player.evolution === "swarmOrganism" ? 4 : 0);
+      const cells = 2 + player.splitting * 2 + (hasEvolution("swarmOrganism") ? 4 : 0);
       ctx.globalAlpha = 0.82;
       for (let i = 0; i < cells; i++) {
         const a = pulse * (1.8 + player.splitting * 0.08) + (i / cells) * TAU;
@@ -2031,7 +2170,7 @@
       ctx.globalAlpha = 1;
     }
 
-    const eyes = 1 + player.eyes * 3 + (player.evolution === "swarmOrganism" ? 8 : 0);
+    const eyes = 1 + player.eyes * 3 + (hasEvolution("swarmOrganism") ? 8 : 0);
     for (let i = 0; i < eyes; i++) {
       const a = (i / eyes) * TAU + Math.sin(pulse + i) * 0.5;
       const ex = Math.cos(a) * r * 0.35;
@@ -2287,6 +2426,7 @@
       Math.round(player.armor * 100),
       Math.round(player.regen * 10),
       Math.round(xpMultiplier() * 100),
+      activeDifficulty,
       player.tentacles,
       player.acid,
       player.electric,
@@ -2304,20 +2444,20 @@
     lastStatsSignature = signature;
 
     const mutationChips = [
-      ["TEN", "T", player.tentacles],
-      ["ACD", "A", player.acid],
-      ["ELC", "E", player.electric],
-      ["SPO", "P", player.spores],
-      ["EYE", "I", player.eyes],
-      ["SHL", "S", player.shell],
-      ["SPL", "X", player.splitting],
-      ["ABS", "H", player.absorption],
-      ["SLM", "L", player.slime],
-      ["DSH", "D", player.dash],
-      ["SPD", "V", player.accelStack],
+      ["tentacles", "TEN", player.tentacles],
+      ["acid", "ACD", player.acid],
+      ["electric", "ELC", player.electric],
+      ["spores", "SPO", player.spores],
+      ["eyes", "EYE", player.eyes],
+      ["shell", "SHL", player.shell],
+      ["splitting", "SPL", player.splitting],
+      ["absorption", "ABS", player.absorption],
+      ["slime", "SLM", player.slime],
+      ["dash", "DSH", player.dash],
+      ["acceleration", "SPD", player.accelStack],
     ]
       .filter(([, , value]) => value > 0)
-      .map(([label, icon, value]) => `<span class="stat-chip mutation" title="${label}"><i>${icon}</i><b>${value}</b></span>`)
+      .map(([id, label, value]) => `<span class="stat-chip mutation" title="${label}"><b>${label}</b><i>${mutationIcons[id].repeat(value)}</i></span>`)
       .join("");
 
     statPanel.innerHTML = `
@@ -2326,8 +2466,9 @@
       <span class="stat-chip"><b>ARM</b>${Math.round(player.armor * 100)}%</span>
       <span class="stat-chip"><b>REG</b>${player.regen.toFixed(1)}/s</span>
       <span class="stat-chip"><b>XP</b>x${xpMultiplier().toFixed(2)}</span>
+      <span class="stat-chip"><b>DIF</b>${(difficultyDefs[activeDifficulty] || difficultyDefs.easy).name}</span>
       ${player.evolution ? `<span class="stat-chip"><b>EVO</b>${player.evolutionName} Lv.${player.evolutionLevel}/3</span>` : ""}
-      ${mutationChips || `<span class="stat-chip mutation"><i>?</i><b>0</b></span>`}
+      ${mutationChips || `<span class="stat-chip mutation"><i>○</i></span>`}
     `;
   }
 
@@ -2395,6 +2536,9 @@
   canvas.addEventListener("pointerup", () => {
     mobilePointer = null;
   });
+  difficultyButtons.forEach((button) => {
+    button.addEventListener("click", () => setDifficulty(button.dataset.difficulty));
+  });
   startButton.addEventListener("click", startRun);
   restartButton.addEventListener("click", startRun);
   resumeButton.addEventListener("click", resumeRun);
@@ -2404,6 +2548,7 @@
   window.addEventListener("blur", pauseRun);
 
   resize();
+  setDifficulty(activeDifficulty);
   updateHud();
   requestAnimationFrame(frame);
 })();

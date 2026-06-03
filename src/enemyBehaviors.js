@@ -9,15 +9,10 @@ const enemyBehaviorRegistry = {
     },
   },
   [ENEMY_BEHAVIORS.DASHER]: {
-    updateAim(enemy, player, dt) {
+    updateAim(enemy) {
       const aim = enemy.components.movement;
-      aim.lockTimer -= dt;
-      const closeToLock = (enemy.x - aim.targetX) ** 2 + (enemy.y - aim.targetY) ** 2 < 24 ** 2;
-      if (aim.lockTimer <= 0 || closeToLock) {
-        aim.targetX = player.x;
-        aim.targetY = player.y;
-        aim.lockTimer = 0.85;
-      }
+      aim.targetX = enemy.x + (aim.fixedDirX || 0) * 1200;
+      aim.targetY = enemy.y + (aim.fixedDirY || 0) * 1200;
     },
   },
   [ENEMY_BEHAVIORS.RANGED]: {

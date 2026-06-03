@@ -133,14 +133,12 @@ button:focus-visible {
 }
 
 .stat-chip i {
-  display: inline-grid;
-  place-items: center;
-  width: 16px;
-  height: 16px;
-  border-radius: 50%;
-  background: rgba(255, 65, 109, 0.22);
+  display: inline-flex;
+  align-items: center;
+  min-width: 16px;
+  min-height: 16px;
   color: #ffe4e8;
-  font-size: 10px;
+  font-size: 13px;
   font-style: normal;
   font-weight: 950;
 }
@@ -227,6 +225,34 @@ button:focus-visible {
   line-height: 1.5;
 }
 
+.difficulty-select {
+  display: inline-grid;
+  grid-template-columns: repeat(3, minmax(82px, 1fr));
+  gap: 6px;
+  margin: 8px 0 18px;
+  padding: 5px;
+  border: 1px solid rgba(143, 255, 211, 0.22);
+  border-radius: 8px;
+  background: rgba(5, 8, 12, 0.68);
+}
+
+.difficulty-select button {
+  min-height: 38px;
+  padding: 0 12px;
+  border-color: transparent;
+  background: transparent;
+  color: rgba(255, 232, 235, 0.72);
+  box-shadow: none;
+}
+
+.difficulty-select button:hover,
+.difficulty-select button:focus-visible,
+.difficulty-select button.active {
+  background: rgba(143, 255, 211, 0.14);
+  border-color: rgba(143, 255, 211, 0.42);
+  color: #d4fff0;
+}
+
 .pause-panel {
   background: rgba(1, 2, 4, 0.72);
   backdrop-filter: blur(10px);
@@ -305,16 +331,22 @@ button:focus-visible {
 }
 
 .choice .stack i {
-  width: 18px;
-  height: 7px;
-  border-radius: 99px;
-  background: rgba(255, 232, 235, 0.18);
+  width: 22px;
+  height: 22px;
+  display: inline-grid;
+  place-items: center;
+  border-radius: 50%;
+  background: rgba(255, 232, 235, 0.08);
+  color: rgba(255, 232, 235, 0.42);
+  font-size: 13px;
+  font-style: normal;
   box-shadow: none;
 }
 
 .choice .stack i.on {
-  background: #ff416d;
-  box-shadow: 0 0 12px rgba(255, 65, 109, 0.72);
+  background: rgba(255, 65, 109, 0.2);
+  color: #ffe4e8;
+  box-shadow: 0 0 12px rgba(255, 65, 109, 0.42);
 }
 
 .choice .path {
@@ -335,6 +367,10 @@ button:focus-visible {
 
   .choice-grid {
     grid-template-columns: 1fr;
+  }
+
+  .difficulty-select {
+    width: 100%;
   }
 
   .choice {
